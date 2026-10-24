@@ -44,4 +44,4 @@ jobs:
 
       - name: Vault logs
         if: failure()
-        run: docker compose logs vault
+        run: docker compose logs vault lldap

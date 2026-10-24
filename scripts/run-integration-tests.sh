@@ -28,8 +28,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "--- Starting Vault"
-docker compose up -d --wait vault
-docker compose run --rm vault-setup
+docker compose up -d --wait vault lldap
+docker compose run --rm lldap-bootstrap
+docker compose run --rm --no-deps vault-setup
 
 export VAULT_TEST_ADDR="http://127.0.0.1:${VAULT_PORT}"
 export VAULT_TEST_TOKEN=root

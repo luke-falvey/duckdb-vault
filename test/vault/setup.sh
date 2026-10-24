@@ -32,6 +32,20 @@ vault write auth/userpass/users/shortlived password=shortlived-password token_po
 vault auth list -format=json | grep -q '"corp-users/"' || vault auth enable -path=corp-users userpass
 vault write auth/corp-users/users/alice password=alice-password token_policies=duckdb-rw
 
+# --- ldap (directory served by the lldap container) ------------------------
+vault auth list -format=json | grep -q '"ldap/"' || vault auth enable ldap
+vault write auth/ldap/config \
+	url=ldap://lldap:3890 \
+	binddn=uid=admin,ou=people,dc=example,dc=com \
+	bindpass=lldap-admin-password \
+	userdn=ou=people,dc=example,dc=com \
+	userattr=uid \
+	groupdn=ou=groups,dc=example,dc=com \
+	groupattr=cn \
+	groupfilter='(&(objectClass=groupOfUniqueNames)(member={{.UserDN}}))'
+# Members of the LDAP group duckdb-users get read/write access; other LDAP users only get "default"
+vault write auth/ldap/groups/duckdb-users policies=duckdb-rw
+
 # --- jwt --------------------------------------------------------------------
 vault auth list -format=json | grep -q '"jwt/"' || vault auth enable jwt
 vault write auth/jwt/config jwt_validation_pubkeys=@/setup/jwt_public.pem bound_issuer=duckdb-vault-test

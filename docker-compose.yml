@@ -4,6 +4,7 @@
 #   docker compose down             # stop (dev mode keeps everything in memory)
 #
 # Vault listens on http://127.0.0.1:8200 with root token "root".
+# lldap provides the LDAP directory behind Vault's ldap auth method (only reachable inside the compose network).
 services:
   vault:
     image: hashicorp/vault:1.20
@@ -21,12 +22,44 @@ services:
       timeout: 2s
       retries: 30
 
+  lldap:
+    image: lldap/lldap:stable
+    environment:
+      LLDAP_JWT_SECRET: test-only-jwt-secret
+      LLDAP_KEY_SEED: test-only-key-seed
+      LLDAP_LDAP_BASE_DN: dc=example,dc=com
+      LLDAP_LDAP_USER_PASS: lldap-admin-password
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck", "--config-file", "/data/lldap_config.toml"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # One-shot container that creates the LDAP users and groups in test/vault/ldap
+  lldap-bootstrap:
+    image: lldap/lldap:stable
+    depends_on:
+      lldap:
+        condition: service_healthy
+    entrypoint: ["/app/bootstrap.sh"]
+    environment:
+      LLDAP_URL: http://lldap:17170
+      LLDAP_ADMIN_USERNAME: admin
+      LLDAP_ADMIN_PASSWORD: lldap-admin-password
+      USER_CONFIGS_DIR: /bootstrap/user-configs
+      GROUP_CONFIGS_DIR: /bootstrap/group-configs
+    volumes:
+      - ./test/vault/ldap/users:/bootstrap/user-configs:ro
+      - ./test/vault/ldap/groups:/bootstrap/group-configs:ro
+
   # One-shot container that configures auth methods, policies and seed data
   vault-setup:
     image: hashicorp/vault:1.20
     depends_on:
       vault:
         condition: service_healthy
+      lldap-bootstrap:
+        condition: service_completed_successfully
     environment:
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: root
