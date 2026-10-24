@@ -1,0 +1,124 @@
+# name: test/sql/vault_settings.test
+# description: Settings and behaviour of the vault extension when no Vault server is configured.
+#              Assumes the VAULT_ADDR / VAULT_TOKEN environment variables are not set.
+# group: [vault]
+
+statement error
+SELECT * FROM vault_status();
+----
+Catalog Error
+
+require vault
+
+query II
+SELECT name, value FROM duckdb_settings() WHERE name LIKE 'vault\_%' ESCAPE '\' ORDER BY name;
+----
+vault_addr	(empty)
+vault_auth_method	token
+vault_auth_mount	(empty)
+vault_ca_cert	(empty)
+vault_cache_ttl_seconds	60
+vault_jwt	(empty)
+vault_jwt_path	(empty)
+vault_kv_mount	secret
+vault_kv_prefix	duckdb
+vault_namespace	(empty)
+vault_password	(empty)
+vault_role	(empty)
+vault_tls_skip_verify	false
+vault_token	(empty)
+vault_username	(empty)
+
+# Invalid settings are rejected when set
+statement error
+SET vault_auth_method = 'approle';
+----
+Unknown vault_auth_method 'approle'
+
+statement error
+SET vault_cache_ttl_seconds = -1;
+----
+vault_cache_ttl_seconds must be >= 0
+
+# Writing to Vault without an address gives a clear error
+statement error
+CREATE PERSISTENT SECRET s1 IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+Vault secret storage is not configured
+
+statement error
+DROP PERSISTENT SECRET s1 FROM vault;
+----
+Vault secret storage is not configured
+
+# ... but an unconfigured Vault storage does not get in the way of other secrets
+statement ok
+CREATE SECRET temp_http (TYPE http, BEARER_TOKEN 'abc', SCOPE 'https://example.com');
+
+query III
+SELECT name, persistent, storage FROM which_secret('https://example.com/file.csv', 'http');
+----
+temp_http	TEMPORARY	memory
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+temp_http	memory
+
+query IIII
+SELECT address, auth_method, kv_path, authenticated FROM vault_status();
+----
+NULL	token	secret/duckdb	false
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*Vault is not configured.*
+
+statement ok
+SET vault_addr = 'vault.example.com:8200';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*vault_addr must start with http:// or https://.*
+
+# A Vault address nobody listens on
+statement ok
+SET vault_addr = 'http://127.0.0.1:1';
+
+statement ok
+SET vault_token = 'some-token';
+
+statement error
+CREATE PERSISTENT SECRET s1 IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+Failed to connect to Vault at http://127.0.0.1:1
+
+# Missing credentials for login-based methods are reported before any request is made
+statement ok
+SET vault_auth_method = 'userpass';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*requires vault_username and vault_password.*
+
+statement ok
+SET vault_auth_method = 'jwt';
+
+statement ok
+SET vault_role = 'my-role';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*requires vault_jwt or vault_jwt_path.*
+
+statement ok
+SET vault_jwt_path = '/nonexistent/token';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*Could not read Vault JWT from file '/nonexistent/token'.*

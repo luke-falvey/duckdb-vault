@@ -1,185 +1,203 @@
-# DuckDB Extension Template
-This repository contains a template for creating a DuckDB extension. The main goal of this template is to allow users to easily develop, test and distribute their own DuckDB extension. The main branch of the template is always based on the latest stable DuckDB allowing you to try out your extension right away.
+# DuckDB Vault extension
 
-## Getting started
-First step to getting started is to create your own repo from this template by clicking `Use this template`. Then clone your new repository using 
-```sh
-git clone --recurse-submodules https://github.com/<you>/<your-new-extension-repo>.git
+Store DuckDB [secrets](https://duckdb.org/docs/stable/configuration/secrets_manager) in
+[HashiCorp Vault](https://developer.hashicorp.com/vault) instead of DuckDB's local secret directory
+(`~/.duckdb/stored_secrets`).
+
+The extension adds a persistent secret storage called `vault`. Secrets created in it are written to a Vault
+KV v2 secrets engine and read back from there by every DuckDB process pointed at the same Vault.
+
+```sql
+LOAD vault;
+
+SET vault_addr = 'https://vault.example.com:8200';
+-- token taken from VAULT_TOKEN or ~/.vault-token, see "Authentication" below
+
+CREATE PERSISTENT SECRET my_s3 IN vault (
+    TYPE s3, KEY_ID 'AKIA...', SECRET '...', REGION 'eu-west-1', SCOPE 's3://my-bucket'
+);
+
+-- Used automatically, like any other secret
+SELECT * FROM 's3://my-bucket/data.parquet';
+
+FROM duckdb_secrets();                 -- storage = 'vault'
+DROP PERSISTENT SECRET my_s3 FROM vault;
+
+-- Make Vault the default for all persistent secrets
+SET default_secret_storage = 'vault';
+CREATE PERSISTENT SECRET my_gcs (TYPE gcs, KEY_ID '...', SECRET '...');
 ```
-Note that `--recurse-submodules` will ensure DuckDB is pulled which is required to build the extension.
+
+When `vault_addr` is not set (and `VAULT_ADDR` is not in the environment), the `vault` storage is empty
+and DuckDB behaves exactly as without the extension.
+
+## Settings
+
+All settings are global (`SET` or `SET GLOBAL`). Settings left empty fall back to the standard Vault
+environment variables.
+
+| Setting | Default | Description |
+|---|---|---|
+| `vault_addr` | `$VAULT_ADDR` | Vault address, e.g. `https://vault:8200` |
+| `vault_namespace` | `$VAULT_NAMESPACE` | Vault Enterprise namespace |
+| `vault_auth_method` | `token` | `token`, `userpass`, `ldap`, `kubernetes` or `jwt` |
+| `vault_auth_mount` | method name | Mount path of the auth method, e.g. `corp-ldap` |
+| `vault_token` | `$VAULT_TOKEN`, then `~/.vault-token` | Token for the `token` method |
+| `vault_username` / `vault_password` | `$VAULT_USERNAME` / `$VAULT_PASSWORD` | For `userpass` and `ldap` |
+| `vault_role` | `$VAULT_ROLE` | Role for `kubernetes` and `jwt` |
+| `vault_jwt` | `$VAULT_JWT` | JWT for `kubernetes` and `jwt` |
+| `vault_jwt_path` | kubernetes: `/var/run/secrets/kubernetes.io/serviceaccount/token` | File to read the JWT from |
+| `vault_kv_mount` | `secret` | Mount path of the KV v2 engine |
+| `vault_kv_prefix` | `duckdb` | Path inside the mount under which secrets are stored |
+| `vault_cache_ttl_seconds` | `60` | How long secrets read from Vault are cached. `0` reads Vault on every lookup |
+| `vault_ca_cert` | `$VAULT_CACERT` | CA certificate file for verifying Vault's TLS certificate |
+| `vault_tls_skip_verify` | `false` | Disable TLS verification (insecure) |
+
+Settings, including `vault_token` and `vault_password`, are visible in `duckdb_settings()`. Prefer the
+environment variables for credentials.
+
+`vault_status()` shows the resolved configuration and whether DuckDB can log in:
+
+```sql
+SELECT * FROM vault_status();
+-- address | namespace | auth_method | kv_path | authenticated | display_name | policies | token_ttl | error
+```
+
+## Authentication
+
+```sql
+-- Token (default): vault_token, else VAULT_TOKEN, else ~/.vault-token
+SET vault_auth_method = 'token';
+
+-- Username and password
+SET vault_auth_method = 'userpass';     -- or 'ldap'
+SET vault_username = 'alice';           -- password from VAULT_PASSWORD
+
+-- Kubernetes service account (inside a pod)
+SET vault_auth_method = 'kubernetes';
+SET vault_role = 'duckdb';
+
+-- Any JWT, e.g. GitHub Actions OIDC
+SET vault_auth_method = 'jwt';
+SET vault_role = 'duckdb';
+SET vault_jwt_path = '/path/to/token.jwt';
+```
+
+Tokens from logins are cached and renewed by logging in again shortly before they expire, or after Vault
+rejects them.
+
+## Storage format
+
+Each DuckDB secret is one KV v2 entry at `<vault_kv_mount>/<vault_kv_prefix>/<secret name>` (secret names are
+lower-case). With the defaults, `CREATE PERSISTENT SECRET my_s3 IN vault (...)` writes `secret/duckdb/my_s3`:
+
+```
+$ vault kv get secret/duckdb/my_s3
+========== Data ==========
+Key                      Value
+---                      -----
+duckdb_format_version    1
+duckdb_provider          config
+duckdb_redact_keys       [secret session_token]
+duckdb_scope             [s3://my-bucket]
+duckdb_type              s3
+duckdb_types             map[use_ssl:BOOLEAN]
+key_id                   AKIA...
+region                   eu-west-1
+secret                   wJalr...
+use_ssl                  true
+```
+
+| Field | Content |
+|---|---|
+| `duckdb_type` | Secret type (`s3`, `gcs`, `http`, …). **Required**: entries without it are ignored |
+| `duckdb_provider` | Secret provider, default `config` |
+| `duckdb_scope` | List of scope prefixes |
+| `duckdb_types` | Map of key → DuckDB type, for values that are not `VARCHAR` |
+| `duckdb_redact_keys` | Keys shown as `redacted` in `duckdb_secrets()` |
+| `duckdb_format_version` | `1` |
+| any other field | One secret value, as a string |
+
+Values are plain strings so other tools can use them directly (for example, Vault Agent templates or
+applications reading the same credentials). Non-string values are stored as their DuckDB text form and converted
+back using `duckdb_types`, e.g. `MAP {'X-Key': 'v'}` is stored as `{X-Key=v}` with type `MAP(VARCHAR, VARCHAR)`.
+
+### Writing secrets with the Vault CLI
+
+Entries can be written by hand. Only `duckdb_type` is required. Lists may be written as comma-separated text
+and maps as JSON text:
+
+```sh
+vault kv put secret/duckdb/analytics_s3 \
+    duckdb_type=s3 \
+    duckdb_scope='s3://analytics,s3://analytics-archive' \
+    duckdb_types='{"use_ssl": "BOOLEAN"}' \
+    key_id=AKIA... secret=... region=eu-west-1 use_ssl=true
+```
+
+Without `duckdb_redact_keys`, every value is redacted except well-known non-sensitive keys (`region`,
+`endpoint`, `url_style`, `use_ssl`, `account_name`, …). Keys starting with `duckdb_` are reserved.
+
+### Behaviour
+
+- `CREATE` uses KV check-and-set, so it fails if the secret already exists. `IF NOT EXISTS` and `OR REPLACE` work
+  as usual. A soft-deleted entry (`vault kv delete`) can be created again.
+- `DROP` deletes the entry's metadata, which removes all its versions.
+- Changes made directly in Vault are picked up after `vault_cache_ttl_seconds`.
+- Writes go to Vault right away and are not rolled back with the DuckDB transaction, the same as local
+  persistent secrets.
+- Only key/value secrets can be stored. All built-in DuckDB secret types are key/value secrets.
+- When Vault is configured but unreachable, statements that look up secrets fail with the connection error.
+
+### Vault policy
+
+DuckDB needs these capabilities on its KV path (defaults shown):
+
+```hcl
+path "secret/data/duckdb/*"     { capabilities = ["create", "read", "update"] }
+path "secret/metadata/duckdb/*" { capabilities = ["read", "list", "delete"] }
+path "secret/metadata/duckdb"   { capabilities = ["list"] }
+```
+
+Read-only access (`read` on `data/`, `read`/`list` on `metadata/`) is enough to use secrets without creating or
+dropping them.
 
 ## Building
-### Managing dependencies
-> [!IMPORTANT]  
-> The example extension uses VCPKG to build with a dependency for instructive purposes, so when skipping this step the build may not work without removing the dependency.
 
-DuckDB extensions uses VCPKG for dependency management. Enabling VCPKG is very simple: follow the [installation instructions](https://vcpkg.io/en/getting-started) or just run the following:
-```shell
-cd <your-working-dir-not-the-plugin-repo>
-git clone https://github.com/Microsoft/vcpkg.git
-cd vcpkg && git checkout 84bab45d415d22042bd0b9081aea57f362da3f35
-sh ./scripts/bootstrap.sh -disableMetrics
-export VCPKG_TOOLCHAIN_PATH=`pwd`/scripts/buildsystems/vcpkg.cmake
-```
-
-> [!NOTE]
-> VCPKG is only required for extensions that want to rely on it for dependency management. If you want to develop an extension without dependencies, or want to do your own dependency management, just skip this step. 
-
-### Updating Submodules
-DuckDB extensions use two submodules that are included in your forked extension repo when you use the `--recurse-submodules` flag. These modules are:
-
-| Name                  | Repository                                      | Description |
-|-----------------------|-------------------------------------------------|-------------|
-| duckdb                | https://github.com/duckdb/duckdb                | This repository contains core DuckDB code required for building extensions.            |
-| extension-ci-tools    | https://github.com/duckdb/extension-ci-tools    | This repository contains reusable components for building, testing and deploying DuckDB extensions.            |
-
-
-> [!IMPORTANT]  
-> It is recommended that you update your submodules at least once every other major LTS release to avoid CI/CD pipeline build errors caused by remaining pinned to a stale commit of these submodules.
-
-To update all submodules to the latest commit hash:
-```bash
+```sh
 git submodule update --init --recursive
+make            # build/release/duckdb with the extension statically linked
+make test       # unit tests (no Vault needed)
 ```
 
-To update your submodules to a specific commit hash, for example to update duckdb to the hash `8e146474d7adb960c5a2941142fe4482cc7dfc08`:
-```bash
-cd duckdb 
-git fetch --all
-git checkout 8e146474d7adb960c5a2941142fe4482cc7dfc08   # or any tag/branch/commit hash
-cd ..
-git add duckdb
-git commit -m "Pin DuckDB submodule to cc7dfc08"
-git push HEAD:update-submodule-branch
-```
+The only external dependency is OpenSSL (via vcpkg in CI, or system packages locally). HTTP and JSON use the
+libraries bundled with DuckDB.
 
-### Build steps
-Now to build the extension, run:
-```sh
-make
-```
-The main binaries that will be built are:
-```sh
-./build/release/duckdb
-./build/release/test/unittest
-./build/release/extension/<extension_name>/<extension_name>.duckdb_extension
-```
-- `duckdb` is the binary for the duckdb shell with the extension code automatically loaded. 
-- `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
-- `<extension_name>.duckdb_extension` is the loadable binary as it would be distributed.
+## Integration tests
 
-### Tips for speedy builds
-DuckDB extensions currently rely on DuckDB's build system to provide easy testing and distributing. This does however come at the downside of requiring the template to build DuckDB and its unittest binary every time you build your extension. To mitigate this, we highly recommend installing [ccache](https://ccache.dev/) and [ninja](https://ninja-build.org/). This will ensure you only need to build core DuckDB once and allows for rapid rebuilds.
-
-To build using ninja and ccache ensure both are installed and run:
+The tests in `test/sql/integration/` run against a real Vault dev server started by `docker-compose.yml`.
+`test/vault/setup.sh` configures it: policies, userpass users (including one with short-lived tokens), a custom
+auth mount, JWT auth with a test key, a second KV mount, and hand-written entries.
 
 ```sh
-GEN=ninja make
+make                      # build first
+make integration-test     # starts Vault with docker compose, runs the tests, stops Vault
 ```
 
-## Running the extension
-To run the extension code, simply start the shell with `./build/release/duckdb`. This shell will have the extension pre-loaded.  
+`scripts/run-integration-tests.sh` also checks the raw Vault entry against the format above
+(`scripts/check_vault_format.py`). Set `KEEP_VAULT=1` to leave Vault running afterwards
+(`http://127.0.0.1:8200`, token `root`). The JWT fixtures can be regenerated with `test/vault/generate-jwt.sh`.
 
-Now we can use the features from the extension directly in DuckDB. The template contains a single scalar function `waddle()` that takes a string arguments and returns a string:
-```
-D select waddle('Jane') as result;
-┌───────────────┐
-│    result     │
-│    varchar    │
-├───────────────┤
-│ Quack Jane 🐥 │
-└───────────────┘
-```
+To run a single test against a running Vault:
 
-## Running the tests
-Different tests can be created for DuckDB extensions. The primary way of testing DuckDB extensions should be the SQL tests in `./test/sql`. These SQL tests can be run using:
 ```sh
-make test
+docker compose up -d --wait vault && docker compose run --rm vault-setup
+VAULT_TEST_ADDR=http://127.0.0.1:8200 VAULT_TEST_TOKEN=root \
+    build/release/test/unittest test/sql/integration/vault_auth.test
 ```
 
-## Getting started with your own extension
-After creating a repository from this template, the first step is to name your extension. To rename the extension, run:
-```sh
-# Note: This will rewrite this file!
-python3 ./scripts/bootstrap-template.py <extension_name_you_want>
-```
-Feel free to delete the script after this step.
+Without `VAULT_TEST_ADDR` the integration tests are skipped, so `make test` works without Docker.
+`test/sql/vault_settings.test` expects `VAULT_ADDR` and `VAULT_TOKEN` to be unset.
 
-Now you're good to go! After a (re)build, you should now be able to use your duckdb extension:
-```
-./build/release/duckdb
-D select <extension_name_you_chose>('Jane') as result;
-┌─────────────────────────────────────┐
-│                result               │
-│               varchar               │
-├─────────────────────────────────────┤
-│ <extension_name_you_chose> Jane 🐥  │
-└─────────────────────────────────────┘
-```
-
-For inspiration/examples on how to extend DuckDB in a more meaningful way, check out the [test extensions](https://github.com/duckdb/duckdb/blob/main/test/extension),
-the [in-tree extensions](https://github.com/duckdb/duckdb/tree/main/extension), and the [out-of-tree extensions](https://github.com/duckdblabs).
-
-## Distributing your extension
-To distribute your extension binaries, there are a few options.
-
-### Community extensions
-The recommended way of distributing extensions is through the [community extensions repository](https://github.com/duckdb/community-extensions).
-This repository is designed specifically for extensions that are built using this extension template, meaning that as long as your extension can be
-built using the default CI in this template, submitting it to the community extensions is a very simple process. The process works similarly to popular
-package managers like homebrew and vcpkg, where a PR containing a descriptor file is submitted to the package manager repository. After the CI in the 
-community extensions repository completes, the extension can be installed and loaded in DuckDB with:
-```SQL
-INSTALL <my_extension> FROM community;
-LOAD <my_extension>
-```
-For more information, see the [community extensions documentation](https://duckdb.org/community_extensions/documentation).
-
-### Downloading artifacts from GitHub
-The default CI in this template will automatically upload the binaries for every push to the main branch as GitHub Actions artifacts. These
-can be downloaded manually and then loaded directly using:
-```SQL
-LOAD '/path/to/downloaded/extension.duckdb_extension';
-```
-Note that this will require starting DuckDB with the
-`allow_unsigned_extensions` option set to true. How to set this will depend on the client you're using. For the CLI it is done like:
-```shell
-duckdb -unsigned
-```
-
-### Uploading to a custom repository
-If for some reason distributing through community extensions is not an option, extensions can also be uploaded to a custom extension repository.
-This will give some more control over where and how the extensions are distributed, but comes with the downside of requiring the `allow_unsigned_extensions`
-option to be set. For examples of how to configure a manual GitHub Actions deploy pipeline, check out the extension deploy script in https://github.com/duckdb/extension-ci-tools.
-Some examples of extensions that use this CI/CD workflow check out [spatial](https://github.com/duckdblabs/duckdb_spatial) or [aws](https://github.com/duckdb/duckdb_aws).
-
-Extensions in custom repositories can be installed and loaded using:
-```SQL
-INSTALL <my_extension> FROM 'http://my-custom-repo'
-LOAD <my_extension>
-```
-
-### Versioning of your extension
-Extension binaries will only work for the specific DuckDB version they were built for. The version of DuckDB that is targeted 
-is set to the latest stable release for the main branch of the template so initially that is all you need. As new releases 
-of DuckDB are published however, the extension repository will need to be updated. The template comes with a workflow set-up
-that will automatically build the binaries for all DuckDB target architectures that are available in the corresponding DuckDB
-version. This workflow is found in `.github/workflows/MainDistributionPipeline.yml`. It is up to the extension developer to keep
-this up to date with DuckDB. Note also that its possible to distribute binaries for multiple DuckDB versions in this workflow 
-by simply duplicating the jobs.
-
-## Setting up CLion 
-
-### Opening project
-Configuring CLion with the extension template requires a little work. Firstly, make sure that the DuckDB submodule is available. 
-Then make sure to open `./duckdb/CMakeLists.txt` (so not the top level `CMakeLists.txt` file from this repo) as a project in CLion.
-Now to fix your project path go to `tools->CMake->Change Project Root`([docs](https://www.jetbrains.com/help/clion/change-project-root-directory.html)) to set the project root to the root dir of this repo.
-
-### Debugging
-To set up debugging in CLion, there are two simple steps required. Firstly, in `CLion -> Settings / Preferences -> Build, Execution, Deploy -> CMake` you will need to add the desired builds (e.g. Debug, Release, RelDebug, etc). There's different ways to configure this, but the easiest is to leave all empty, except the `build path`, which needs to be set to `../build/{build type}`, and CMake Options to which the following flag should be added, with the path to the extension CMakeList:
-
-```
--DDUCKDB_EXTENSION_CONFIGS=<path_to_the_exentension_CMakeLists.txt>
-```
-
-The second step is to configure the unittest runner as a run/debug configuration. To do this, go to `Run -> Edit Configurations` and click `+ -> Cmake Application`. The target and executable should be `unittest`. This will run all the DuckDB tests. To specify only running the extension specific tests, add `--test-dir ../../.. [sql]` to the `Program Arguments`. Note that it is recommended to use the `unittest` executable for testing/development within CLion. The actual DuckDB CLI currently does not reliably work as a run target in CLion.
+Kubernetes and LDAP logins use the same request code as `jwt` and `userpass` respectively, but are not covered by
+the integration tests because they need a Kubernetes API server or an LDAP directory.

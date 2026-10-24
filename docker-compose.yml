@@ -1,0 +1,35 @@
+# Vault dev server for the integration tests (see scripts/run-integration-tests.sh).
+#
+#   docker compose up -d --wait     # start Vault and run test/vault/setup.sh
+#   docker compose down             # stop (dev mode keeps everything in memory)
+#
+# Vault listens on http://127.0.0.1:8200 with root token "root".
+services:
+  vault:
+    image: hashicorp/vault:1.20
+    command: server -dev
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "${VAULT_PORT:-8200}:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # One-shot container that configures auth methods, policies and seed data
+  vault-setup:
+    image: hashicorp/vault:1.20
+    depends_on:
+      vault:
+        condition: service_healthy
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    volumes:
+      - ./test/vault:/setup:ro
+    entrypoint: ["/bin/sh", "/setup/setup.sh"]

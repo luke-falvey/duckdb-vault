@@ -1,0 +1,138 @@
+# name: test/sql/integration/vault_format.test
+# description: Reading entries written by hand in Vault, and the mount/prefix settings
+# group: [vault_integration]
+
+require vault
+
+require-env VAULT_TEST_ADDR
+
+require-env VAULT_TEST_TOKEN
+
+statement ok
+SET vault_addr = '${VAULT_TEST_ADDR}';
+
+statement ok
+SET vault_token = '${VAULT_TEST_TOKEN}';
+
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+# test/vault/setup.sh seeds secret/it_handwritten/ with:
+#   manual_http          a DuckDB secret written with `vault kv put` (string values only)
+#   not_a_duckdb_secret  an unrelated entry without duckdb_type
+#   deleted_http         a soft-deleted entry
+statement ok
+SET vault_kv_prefix = 'it_handwritten';
+
+query IIIII
+SELECT name, type, provider, persistent, storage FROM duckdb_secrets();
+----
+manual_http	http	config	true	vault
+
+query I
+SELECT scope FROM duckdb_secrets();
+----
+[https://api.example.com, https://other.example.com]
+
+# No duckdb_redact_keys field: everything except known non-sensitive keys is redacted
+query I
+SELECT secret_string FROM duckdb_secrets();
+----
+name=manual_http;type=http;provider=config;serializable=true;scope=https://api.example.com,https://other.example.com;bearer_token=redacted;verify_ssl=false
+
+query I
+SELECT secret_string FROM duckdb_secrets(redact=false);
+----
+name=manual_http;type=http;provider=config;serializable=true;scope=https://api.example.com,https://other.example.com;bearer_token=hand-written-token;verify_ssl=false
+
+query II
+SELECT name, storage FROM which_secret('https://other.example.com/x.parquet', 'http');
+----
+manual_http	vault
+
+# Secret names are case-insensitive, like all DuckDB secrets
+statement error
+CREATE PERSISTENT SECRET MANUAL_HTTP IN vault (TYPE http);
+----
+already exists
+
+# A soft-deleted entry can be re-created from DuckDB
+statement ok
+CREATE PERSISTENT SECRET deleted_http IN vault (TYPE http, BEARER_TOKEN 'reborn');
+
+query I
+SELECT name FROM duckdb_secrets() ORDER BY name;
+----
+deleted_http
+manual_http
+
+statement ok
+DROP PERSISTENT SECRET deleted_http FROM vault;
+
+# --- other KV mount and prefixes --------------------------------------------
+statement ok
+SET vault_kv_mount = 'kv-alt';
+
+statement ok
+SET vault_kv_prefix = 'teams/analytics';
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS alt_secret FROM vault;
+
+query I
+SELECT count(*) FROM duckdb_secrets();
+----
+0
+
+statement ok
+CREATE PERSISTENT SECRET alt_secret IN vault (TYPE http, BEARER_TOKEN 'alt');
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+alt_secret	vault
+
+# Same mount, different prefix: not visible
+statement ok
+SET vault_kv_prefix = 'teams/finance';
+
+query I
+SELECT count(*) FROM duckdb_secrets();
+----
+0
+
+# Empty prefix: secrets live at the root of the mount; folders are not secrets
+statement ok
+SET vault_kv_prefix = '';
+
+query I
+SELECT count(*) FROM duckdb_secrets();
+----
+0
+
+statement ok
+SET vault_kv_prefix = '/teams/analytics/';
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+alt_secret
+
+statement ok
+DROP PERSISTENT SECRET alt_secret FROM vault;
+
+# Entry written by the format check in scripts/run-integration-tests.sh
+statement ok
+SET vault_kv_mount = 'secret';
+
+statement ok
+SET vault_kv_prefix = 'it_format_check';
+
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET format_check IN vault (
+    TYPE http,
+    BEARER_TOKEN 'format-token',
+    VERIFY_SSL true,
+    EXTRA_HTTP_HEADERS MAP {'X-A': 'b'},
+    SCOPE 'https://format.example.com'
+);

@@ -1,8 +1,12 @@
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 
 # Configuration of extension
-EXT_NAME=waddle
+EXT_NAME=vault
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
+# Integration tests against a real Vault server (requires docker compose)
+.PHONY: integration-test
+integration-test:
+	./scripts/run-integration-tests.sh
