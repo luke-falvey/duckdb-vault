@@ -1,0 +1,108 @@
+# name: test/sql/integration/vault_kubernetes.test
+# description: The kubernetes auth method against Vault backed by a k3s API server
+# group: [integration]
+
+# Needs Vault and k3s: see scripts/run-integration-tests.sh, which also creates the service account tokens
+
+require vault
+
+require-env VAULT_TEST_ADDR
+
+require-env VAULT_TEST_TOKEN
+
+require-env VAULT_TEST_K8S_TOKENS
+
+statement ok
+SET vault_addr = '{VAULT_TEST_ADDR}';
+
+statement ok
+SET vault_kv_prefix = 'it_kubernetes';
+
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+# Seed a secret with the root token
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET k8s_secret IN vault (TYPE http, BEARER_TOKEN 'from-k8s');
+
+# --- the "duckdb" service account is bound to the Vault role "duckdb" ---------
+statement ok
+SET vault_auth_method = 'kubernetes';
+
+statement ok
+SET vault_role = 'duckdb';
+
+statement ok
+SET vault_jwt_path = '{VAULT_TEST_K8S_TOKENS}/duckdb.jwt';
+
+query IIII
+SELECT auth_method, authenticated, display_name, list_contains(policies, 'duckdb-rw') FROM vault_status();
+----
+kubernetes	true	kubernetes-default-duckdb	true
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+k8s_secret	vault
+
+statement ok
+CREATE PERSISTENT SECRET k8s_created IN vault (TYPE http, BEARER_TOKEN 'written-by-pod');
+
+statement ok
+DROP PERSISTENT SECRET k8s_created FROM vault;
+
+# --- another service account is rejected by the role ---------------------------
+statement ok
+SET vault_jwt_path = '{VAULT_TEST_K8S_TOKENS}/other.jwt';
+
+query II
+SELECT authenticated, error LIKE '%service account name not authorized%' FROM vault_status();
+----
+false	true
+
+statement error
+FROM duckdb_secrets();
+----
+<REGEX>:.*Vault: failed to log in with auth method 'kubernetes'.*service account name not authorized.*
+
+# --- unknown role ---------------------------------------------------------------
+statement ok
+SET vault_jwt_path = '{VAULT_TEST_K8S_TOKENS}/duckdb.jwt';
+
+statement ok
+SET vault_role = 'no-such-role';
+
+query II
+SELECT authenticated, error LIKE '%invalid role name "no-such-role"%' FROM vault_status();
+----
+false	true
+
+# --- the token can also be given inline -------------------------------------------
+statement ok
+SET vault_role = 'duckdb';
+
+statement ok
+SET vault_jwt = 'not-a-jwt';
+
+query II
+SELECT authenticated, error LIKE '%Vault: failed to log in with auth method ''kubernetes''%' FROM vault_status();
+----
+false	true
+
+statement ok
+RESET vault_jwt;
+
+query I
+SELECT authenticated FROM vault_status();
+----
+true
+
+# --- clean up ---------------------------------------------------------------------
+statement ok
+SET vault_auth_method = 'token';
+
+statement ok
+DROP PERSISTENT SECRET k8s_secret FROM vault;

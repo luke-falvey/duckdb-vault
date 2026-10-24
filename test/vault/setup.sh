@@ -46,6 +46,20 @@ vault write auth/ldap/config \
 # Members of the LDAP group duckdb-users get read/write access; other LDAP users only get "default"
 vault write auth/ldap/groups/duckdb-users policies=duckdb-rw
 
+# --- kubernetes (service accounts and tokens from test/vault/k8s/bootstrap.sh) ---
+K8S=/setup/k8s/generated
+vault auth list -format=json | grep -q '"kubernetes/"' || vault auth enable kubernetes
+vault write auth/kubernetes/config \
+	kubernetes_host=https://k3s:6443 \
+	kubernetes_ca_cert=@$K8S/ca.crt \
+	token_reviewer_jwt=@$K8S/reviewer.jwt \
+	disable_local_ca_jwt=true
+vault write auth/kubernetes/role/duckdb \
+	bound_service_account_names=duckdb \
+	bound_service_account_namespaces=default \
+	audience=https://kubernetes.default.svc.cluster.local \
+	token_policies=duckdb-rw
+
 # --- jwt --------------------------------------------------------------------
 vault auth list -format=json | grep -q '"jwt/"' || vault auth enable jwt
 vault write auth/jwt/config jwt_validation_pubkeys=@/setup/jwt_public.pem bound_issuer=duckdb-vault-test

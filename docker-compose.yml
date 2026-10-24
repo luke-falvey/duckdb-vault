@@ -4,7 +4,8 @@
 #   docker compose down             # stop (dev mode keeps everything in memory)
 #
 # Vault listens on http://127.0.0.1:8200 with root token "root".
-# lldap provides the LDAP directory behind Vault's ldap auth method (only reachable inside the compose network).
+# lldap provides the LDAP directory behind Vault's ldap auth method, and k3s (API server only, no nodes) validates
+# the service account tokens used with the kubernetes auth method. Both are only reachable inside the compose network.
 services:
   vault:
     image: hashicorp/vault:1.20
@@ -52,6 +53,33 @@ services:
       - ./test/vault/ldap/users:/bootstrap/user-configs:ro
       - ./test/vault/ldap/groups:/bootstrap/group-configs:ro
 
+  # Kubernetes API server only: enough for Vault to validate service account tokens (TokenReview)
+  k3s:
+    image: rancher/k3s:v1.33.1-k3s1
+    command: server --disable-agent --tls-san k3s --write-kubeconfig-mode 644
+    environment:
+      K3S_KUBECONFIG_OUTPUT: /kube/kubeconfig.yaml
+      KUBECONFIG: /kube/kubeconfig.yaml
+    volumes:
+      - k3s-kubeconfig:/kube
+    healthcheck:
+      test: ["CMD", "kubectl", "get", "--raw", "/readyz"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # One-shot container that creates service accounts and writes their tokens to test/vault/k8s/generated
+  k8s-bootstrap:
+    image: rancher/k3s:v1.33.1-k3s1
+    depends_on:
+      k3s:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
+    volumes:
+      - k3s-kubeconfig:/kube:ro
+      - ./test/vault/k8s/bootstrap.sh:/bootstrap/bootstrap.sh:ro
+      - ./test/vault/k8s/generated:/out
+
   # One-shot container that configures auth methods, policies and seed data
   vault-setup:
     image: hashicorp/vault:1.20
@@ -60,9 +88,14 @@ services:
         condition: service_healthy
       lldap-bootstrap:
         condition: service_completed_successfully
+      k8s-bootstrap:
+        condition: service_completed_successfully
     environment:
       VAULT_ADDR: http://vault:8200
       VAULT_TOKEN: root
     volumes:
       - ./test/vault:/setup:ro
     entrypoint: ["/bin/sh", "/setup/setup.sh"]
+
+volumes:
+  k3s-kubeconfig:

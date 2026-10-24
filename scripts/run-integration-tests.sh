@@ -28,12 +28,17 @@ cleanup() {
 trap cleanup EXIT
 
 echo "--- Starting Vault"
-docker compose up -d --wait vault lldap
-docker compose run --rm lldap-bootstrap
+# Created here so the bind mount is not created root-owned by docker
+mkdir -p test/vault/k8s/generated
+docker compose up -d --wait vault lldap k3s
+docker compose run --rm --no-deps lldap-bootstrap
+docker compose run --rm --no-deps k8s-bootstrap
 docker compose run --rm --no-deps vault-setup
 
 export VAULT_TEST_ADDR="http://127.0.0.1:${VAULT_PORT}"
 export VAULT_TEST_TOKEN=root
+# Service account tokens for the kubernetes auth tests
+export VAULT_TEST_K8S_TOKENS="$PWD/test/vault/k8s/generated"
 # The extension falls back to these; make sure only the explicit test settings are used
 unset VAULT_ADDR VAULT_TOKEN VAULT_NAMESPACE VAULT_USERNAME VAULT_PASSWORD VAULT_ROLE VAULT_JWT VAULT_CACERT || true
 

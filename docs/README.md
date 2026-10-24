@@ -176,9 +176,11 @@ libraries bundled with DuckDB.
 ## Integration tests
 
 The tests in `test/sql/integration/` run against a real Vault dev server started by `docker-compose.yml`,
-together with an [lldap](https://github.com/lldap/lldap) LDAP directory for the `ldap` auth method.
+together with an [lldap](https://github.com/lldap/lldap) LDAP directory for the `ldap` auth method and a
+[k3s](https://k3s.io) Kubernetes API server (no nodes) for the `kubernetes` auth method.
 `test/vault/setup.sh` configures Vault: policies, userpass users (including one with short-lived tokens), a custom
-auth mount, LDAP auth with group-based policies (users and groups in `test/vault/ldap/`), JWT auth with a test key,
+auth mount, LDAP auth with group-based policies (users and groups in `test/vault/ldap/`), Kubernetes auth with
+service accounts created by `test/vault/k8s/bootstrap.sh` (fresh tokens on every run), JWT auth with a test key,
 a second KV mount, and hand-written entries.
 
 ```sh
@@ -193,13 +195,14 @@ make integration-test     # starts Vault with docker compose, runs the tests, st
 To run a single test against a running Vault:
 
 ```sh
-docker compose up -d --wait vault lldap && docker compose run --rm vault-setup
-VAULT_TEST_ADDR=http://127.0.0.1:8200 VAULT_TEST_TOKEN=root \
+mkdir -p test/vault/k8s/generated
+docker compose up -d --wait vault lldap k3s && docker compose run --rm vault-setup
+VAULT_TEST_ADDR=http://127.0.0.1:8200 VAULT_TEST_TOKEN=root VAULT_TEST_K8S_TOKENS=$PWD/test/vault/k8s/generated \
     build/release/test/unittest test/sql/integration/vault_auth.test
 ```
 
 Without `VAULT_TEST_ADDR` the integration tests are skipped, so `make test` works without Docker.
 `test/sql/vault_settings.test` expects `VAULT_ADDR` and `VAULT_TOKEN` to be unset.
 
-Kubernetes logins use the same request code as `jwt`, but are not covered by the integration tests because Vault
-needs a Kubernetes API server to validate service account tokens.
+The Kubernetes tests pass the service account token through `vault_jwt_path`. The default path inside a pod
+(`/var/run/secrets/kubernetes.io/serviceaccount/token`) is not exercised, since the tests do not run in a pod.
