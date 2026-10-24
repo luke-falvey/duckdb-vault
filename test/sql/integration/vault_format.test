@@ -9,10 +9,10 @@ require-env VAULT_TEST_ADDR
 require-env VAULT_TEST_TOKEN
 
 statement ok
-SET vault_addr = '${VAULT_TEST_ADDR}';
+SET vault_addr = '{VAULT_TEST_ADDR}';
 
 statement ok
-SET vault_token = '${VAULT_TEST_TOKEN}';
+SET vault_token = '{VAULT_TEST_TOKEN}';
 
 statement ok
 SET vault_cache_ttl_seconds = 0;
@@ -32,7 +32,7 @@ manual_http	http	config	true	vault
 query I
 SELECT scope FROM duckdb_secrets();
 ----
-[https://api.example.com, https://other.example.com]
+['https://api.example.com', 'https://other.example.com']
 
 # No duckdb_redact_keys field: everything except known non-sensitive keys is redacted
 query I

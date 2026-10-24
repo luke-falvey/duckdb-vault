@@ -86,8 +86,7 @@ optional_ptr<VaultClient> VaultSecretStorage::Connect(optional_ptr<ClientContext
 	return client.get();
 }
 
-unique_ptr<SecretEntry> VaultSecretStorage::FetchSecret(VaultClient &vault, const string &name,
-                                                        optional_ptr<ClientContext> context) {
+unique_ptr<SecretEntry> VaultSecretStorage::FetchSecret(VaultClient &vault, const string &name) {
 	auto path = DataPath(vault.Config(), name);
 	auto response = vault.Request("GET", path);
 	if (response.status == 404) {
@@ -98,7 +97,7 @@ unique_ptr<SecretEntry> VaultSecretStorage::FetchSecret(VaultClient &vault, cons
 	}
 	auto doc = JSONReader::Parse(response.body);
 	auto data = JSONReader::Get(JSONReader::Get(doc.Root(), "data"), "data");
-	auto secret = VaultSecretFormat::Deserialize(name, data, context);
+	auto secret = VaultSecretFormat::Deserialize(name, data);
 	if (!secret) {
 		return nullptr;
 	}
@@ -117,7 +116,7 @@ bool VaultSecretStorage::SecretExists(VaultClient &vault, const string &name) {
 	return true;
 }
 
-void VaultSecretStorage::EnsureLoaded(VaultClient &vault, optional_ptr<ClientContext> context) {
+void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
 	auto now = std::chrono::steady_clock::now();
 	auto ttl = std::chrono::seconds(cache_ttl_seconds);
 	if (cache_loaded && now - cache_loaded_at < ttl) {
@@ -145,7 +144,7 @@ void VaultSecretStorage::EnsureLoaded(VaultClient &vault, optional_ptr<ClientCon
 		if (key.empty() || key.back() == '/') {
 			continue; // sub-folder
 		}
-		auto entry = FetchSecret(vault, key, context);
+		auto entry = FetchSecret(vault, key);
 		if (entry) {
 			new_cache[key] = std::move(entry);
 		}
@@ -243,7 +242,7 @@ vector<SecretEntry> VaultSecretStorage::AllSecrets(optional_ptr<CatalogTransacti
 	if (!vault) {
 		return result;
 	}
-	EnsureLoaded(*vault, GetContext(transaction));
+	EnsureLoaded(*vault);
 	for (auto &entry : cache) {
 		result.push_back(*entry.second);
 	}
@@ -281,7 +280,7 @@ SecretMatch VaultSecretStorage::LookupSecret(const string &path, const string &t
 	if (!vault) {
 		return best;
 	}
-	EnsureLoaded(*vault, GetContext(transaction));
+	EnsureLoaded(*vault);
 	for (auto &item : cache) {
 		auto &entry = *item.second;
 		if (!StringUtil::CIEquals(entry.secret->GetType().GetIdentifierName(), type)) {
@@ -308,7 +307,7 @@ unique_ptr<SecretEntry> VaultSecretStorage::GetSecretByName(const string &name,
 	if (!vault) {
 		return nullptr;
 	}
-	EnsureLoaded(*vault, GetContext(transaction));
+	EnsureLoaded(*vault);
 	auto entry = cache.find(StringUtil::Lower(name));
 	if (entry == cache.end()) {
 		return nullptr;

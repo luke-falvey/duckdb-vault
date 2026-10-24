@@ -38,9 +38,9 @@ private:
 	//! Discards the cached token and secrets when the settings changed. Caller must hold `lock`.
 	optional_ptr<VaultClient> Connect(optional_ptr<ClientContext> context, bool required);
 	//! (Re)load all secrets from Vault if the cache is stale. Caller must hold `lock`.
-	void EnsureLoaded(VaultClient &client, optional_ptr<ClientContext> context);
+	void EnsureLoaded(VaultClient &client);
 	//! Read one secret from Vault (nullptr if missing or not a DuckDB secret)
-	unique_ptr<SecretEntry> FetchSecret(VaultClient &client, const string &name, optional_ptr<ClientContext> context);
+	unique_ptr<SecretEntry> FetchSecret(VaultClient &client, const string &name);
 	//! Whether a current (non-deleted) KV version exists at the secret's path
 	bool SecretExists(VaultClient &client, const string &name);
 	//! Write the secret; returns false on a check-and-set conflict (the secret exists and cas was requested)

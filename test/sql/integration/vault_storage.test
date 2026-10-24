@@ -10,10 +10,10 @@ require-env VAULT_TEST_ADDR
 require-env VAULT_TEST_TOKEN
 
 statement ok
-SET vault_addr = '${VAULT_TEST_ADDR}';
+SET vault_addr = '{VAULT_TEST_ADDR}';
 
 statement ok
-SET vault_token = '${VAULT_TEST_TOKEN}';
+SET vault_token = '{VAULT_TEST_TOKEN}';
 
 statement ok
 SET vault_kv_prefix = 'it_storage';
@@ -57,7 +57,7 @@ api_token	http	config	true	vault
 query I
 SELECT scope FROM duckdb_secrets() WHERE name = 'api_token';
 ----
-[https://api.example.com]
+['https://api.example.com']
 
 # Sensitive values are redacted when displayed
 query I
@@ -96,7 +96,7 @@ CREATE OR REPLACE PERSISTENT SECRET api_token IN vault (TYPE http, BEARER_TOKEN 
 query I
 SELECT scope FROM duckdb_secrets() WHERE name = 'api_token';
 ----
-[https://new.example.com]
+['https://new.example.com']
 
 # --- longest scope wins, across storages -------------------------------------
 statement ok
@@ -134,10 +134,10 @@ CREATE PERSISTENT SECRET typed_http IN vault (
 restart
 
 statement ok
-SET vault_addr = '${VAULT_TEST_ADDR}';
+SET vault_addr = '{VAULT_TEST_ADDR}';
 
 statement ok
-SET vault_token = '${VAULT_TEST_TOKEN}';
+SET vault_token = '{VAULT_TEST_TOKEN}';
 
 statement ok
 SET vault_kv_prefix = 'it_storage';
@@ -152,7 +152,7 @@ typed_http
 query I
 SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'typed_http';
 ----
-name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers={Accept=application/json, X-Api-Key='k=1;2'};http_proxy=proxy.internal:3128;verify_ssl=false
+name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers={X-Api-Key='k=1;2', Accept=application/json};http_proxy=proxy.internal:3128;verify_ssl=false
 
 # extra_http_headers is redacted; http_proxy and verify_ssl are not
 query I

@@ -33,8 +33,7 @@ struct VaultSecretFormat {
 	static void Serialize(const BaseSecret &secret, JSONBuilder &builder, JSONBuilder::mut_t target);
 
 	//! Build a secret from a KV "data" object. Returns nullptr when the entry is not a DuckDB secret (no duckdb_type).
-	static unique_ptr<BaseSecret> Deserialize(const string &name, JSONReader::val_t data,
-	                                          optional_ptr<ClientContext> context);
+	static unique_ptr<BaseSecret> Deserialize(const string &name, JSONReader::val_t data);
 
 	//! Keys displayed in clear text when an entry does not list its redacted keys
 	static bool IsNonSensitiveKey(const string &key);

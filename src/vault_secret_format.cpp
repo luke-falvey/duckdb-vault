@@ -2,7 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/main/client_context.hpp"
+#include "duckdb/common/type_visitor.hpp"
 
 namespace duckdb {
 
@@ -110,19 +110,17 @@ static case_insensitive_map_t<string> ParseTypes(JSONReader::val_t val) {
 	return result;
 }
 
-static LogicalType ParseType(const string &type, optional_ptr<ClientContext> context) {
-	if (context) {
-		return context->ParseLogicalType(type);
+//! Secrets only hold built-in types, so no catalog (and no client context lock) is needed to parse them
+static LogicalType ParseType(const string &type) {
+	auto result = UnboundType::TryParseAndDefaultBind(type);
+	if (TypeVisitor::Contains(result, LogicalTypeId::UNBOUND)) {
+		throw InvalidInputException("Type \"%s\" is not a built-in type", type);
 	}
-	auto id = TransformStringToLogicalTypeId(type);
-	if (id == LogicalTypeId::UNBOUND || id == LogicalTypeId::INVALID) {
-		throw InvalidInputException("Cannot parse type '%s' without a client context", type);
-	}
-	return LogicalType(id);
+	return result;
 }
 
 //! Convert one stored field into a DuckDB value
-static Value ToValue(JSONReader::val_t val, const string *declared_type, optional_ptr<ClientContext> context) {
+static Value ToValue(JSONReader::val_t val, const string *declared_type) {
 	using namespace duckdb_yyjson; // NOLINT
 	Value result;
 	if (yyjson_is_null(val)) {
@@ -142,7 +140,7 @@ static Value ToValue(JSONReader::val_t val, const string *declared_type, optiona
 	if (!declared_type) {
 		return result;
 	}
-	auto type = ParseType(*declared_type, context);
+	auto type = ParseType(*declared_type);
 	if (result.IsNull()) {
 		return Value(type);
 	}
@@ -174,8 +172,7 @@ bool VaultSecretFormat::IsNonSensitiveKey(const string &key) {
 	return non_sensitive.count(key) > 0;
 }
 
-unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONReader::val_t data,
-                                                      optional_ptr<ClientContext> context) {
+unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONReader::val_t data) {
 	using namespace duckdb_yyjson; // NOLINT
 	if (!data || !yyjson_is_obj(data)) {
 		return nullptr;
@@ -207,7 +204,7 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 		auto type_entry = types.find(key);
 		try {
 			result->secret_map[Identifier(key)] =
-			    ToValue(field, type_entry == types.end() ? nullptr : &type_entry->second, context);
+			    ToValue(field, type_entry == types.end() ? nullptr : &type_entry->second);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw InvalidInputException("Vault secret '%s': could not read field '%s': %s", name, key,

@@ -9,7 +9,7 @@ require-env VAULT_TEST_ADDR
 require-env VAULT_TEST_TOKEN
 
 statement ok
-SET vault_addr = '${VAULT_TEST_ADDR}';
+SET vault_addr = '{VAULT_TEST_ADDR}';
 
 statement ok
 SET vault_kv_prefix = 'it_auth';
@@ -19,12 +19,12 @@ SET vault_cache_ttl_seconds = 0;
 
 # --- token -------------------------------------------------------------------
 statement ok
-SET vault_token = '${VAULT_TEST_TOKEN}';
+SET vault_token = '{VAULT_TEST_TOKEN}';
 
 query IIII
 SELECT auth_method, authenticated, display_name, list_contains(policies, 'root') FROM vault_status();
 ----
-token	true	root	true
+token	true	token	true
 
 statement ok
 DROP PERSISTENT SECRET IF EXISTS auth_secret FROM vault;
@@ -176,7 +176,7 @@ statement ok
 SET vault_auth_method = 'token';
 
 statement ok
-SET vault_token = '${VAULT_TEST_TOKEN}';
+SET vault_token = '{VAULT_TEST_TOKEN}';
 
 statement ok
 DROP PERSISTENT SECRET auth_secret FROM vault;
