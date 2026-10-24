@@ -37,6 +37,17 @@ endif()
 target_link_libraries(${EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
 target_link_libraries(${LOADABLE_EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
 
+# Strip symbols from release builds of the loadable extension. This must happen
+# at link time: DuckDB appends signed metadata to the file afterwards. The
+# exported entry point lives in the dynamic symbol table and is kept.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  if(APPLE)
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "LINKER:-x")
+  elseif(NOT MSVC)
+    target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE "LINKER:--strip-all")
+  endif()
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
