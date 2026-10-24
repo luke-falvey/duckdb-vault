@@ -1,7 +1,8 @@
 # name: test/sql/vault_settings.test
 # description: Settings and behaviour of the vault extension when no Vault server is configured.
-#              Assumes the VAULT_ADDR / VAULT_TOKEN environment variables are not set.
-# group: [vault]
+# group: [sql]
+
+# Assumes the VAULT_ADDR / VAULT_TOKEN environment variables are not set.
 
 statement error
 SELECT * FROM vault_status();

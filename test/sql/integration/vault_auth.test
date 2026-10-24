@@ -1,6 +1,6 @@
 # name: test/sql/integration/vault_auth.test
 # description: Vault authentication methods against a real Vault server configured by test/vault/setup.sh
-# group: [vault_integration]
+# group: [integration]
 
 require vault
 

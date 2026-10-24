@@ -18,11 +18,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(src/include ${OPENSSL_INCLUDE_DIR})
 
 set(EXTENSION_SOURCES
-    src/vault_extension.cpp
-    src/vault_client.cpp
-    src/vault_config.cpp
-    src/vault_secret_format.cpp
-    src/vault_secret_storage.cpp)
+    src/vault_extension.cpp src/vault_client.cpp src/vault_config.cpp
+    src/vault_secret_format.cpp src/vault_secret_storage.cpp)
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

@@ -1,6 +1,6 @@
 # name: test/sql/integration/vault_format.test
 # description: Reading entries written by hand in Vault, and the mount/prefix settings
-# group: [vault_integration]
+# group: [integration]
 
 require vault
 

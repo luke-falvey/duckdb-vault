@@ -1,7 +1,8 @@
 # name: test/sql/integration/vault_storage.test
 # description: Create, read, replace and drop DuckDB secrets in a real Vault server.
-#              Start one with `docker compose up -d --wait` (see scripts/run-integration-tests.sh).
-# group: [vault_integration]
+# group: [integration]
+
+# Needs a Vault server: see scripts/run-integration-tests.sh
 
 require vault
 
