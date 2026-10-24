@@ -24,8 +24,18 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto)
+set(VAULT_LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
+# httplib loads the system certificate store: Keychain on macOS, the Windows
+# cert store on Windows
+if(APPLE)
+  list(APPEND VAULT_LINK_LIBRARIES "-framework CoreFoundation"
+       "-framework Security")
+elseif(WIN32)
+  list(APPEND VAULT_LINK_LIBRARIES crypt32 ws2_32)
+endif()
+
+target_link_libraries(${EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
+target_link_libraries(${LOADABLE_EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
 
 install(
   TARGETS ${EXTENSION_NAME}
