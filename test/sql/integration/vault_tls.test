@@ -1,0 +1,70 @@
+# name: test/sql/integration/vault_tls.test
+# description: Vault over HTTPS, with TLS handled by httpfs
+# group: [integration]
+
+# Needs the vault-tls service: see scripts/run-integration-tests.sh
+
+require vault
+
+require httpfs
+
+require-env VAULT_TEST_TLS_ADDR
+
+require-env VAULT_TEST_TLS_CA
+
+require-env VAULT_TEST_TOKEN
+
+statement ok
+SET vault_addr = '{VAULT_TEST_TLS_ADDR}';
+
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+statement ok
+SET vault_kv_prefix = 'it_tls';
+
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+# The server certificate is self-signed: verification fails until its CA is trusted
+query II
+SELECT authenticated, error LIKE '%Failed to connect to Vault at {VAULT_TEST_TLS_ADDR}%' FROM vault_status();
+----
+false	true
+
+# httpfs's ca_cert_file trusts the CA
+statement ok
+SET ca_cert_file = '{VAULT_TEST_TLS_CA}';
+
+query I
+SELECT authenticated FROM vault_status();
+----
+true
+
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET tls_secret IN vault (TYPE http, BEARER_TOKEN 'over-tls');
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+tls_secret	vault
+
+statement ok
+DROP PERSISTENT SECRET tls_secret FROM vault;
+
+statement ok
+RESET ca_cert_file;
+
+query I
+SELECT authenticated FROM vault_status();
+----
+false
+
+# An http secret scoped to the Vault address can turn verification off for it
+statement ok
+CREATE SECRET vault_no_verify (TYPE http, VERIFY_SSL false, SCOPE '{VAULT_TEST_TLS_ADDR}');
+
+query I
+SELECT authenticated FROM vault_status();
+----
+true

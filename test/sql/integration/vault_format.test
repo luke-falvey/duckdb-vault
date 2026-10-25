@@ -4,6 +4,8 @@
 
 require vault
 
+require httpfs
+
 require-env VAULT_TEST_ADDR
 
 require-env VAULT_TEST_TOKEN

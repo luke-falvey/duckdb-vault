@@ -2,9 +2,6 @@ cmake_minimum_required(VERSION 3.5)
 
 set(TARGET_NAME vault)
 
-# OpenSSL provides TLS for the bundled httplib client used to talk to Vault.
-find_package(OpenSSL REQUIRED)
-
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -15,7 +12,7 @@ set(CMAKE_CXX_STANDARD
     CACHE STRING "C++ standard to enforce")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-include_directories(src/include ${OPENSSL_INCLUDE_DIR})
+include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/vault_extension.cpp src/vault_client.cpp src/vault_config.cpp
@@ -23,19 +20,6 @@ set(EXTENSION_SOURCES
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
-
-set(VAULT_LINK_LIBRARIES OpenSSL::SSL OpenSSL::Crypto)
-# httplib loads the system certificate store: Keychain on macOS, the Windows
-# cert store on Windows
-if(APPLE)
-  list(APPEND VAULT_LINK_LIBRARIES "-framework CoreFoundation"
-       "-framework Security")
-elseif(WIN32)
-  list(APPEND VAULT_LINK_LIBRARIES crypt32 ws2_32)
-endif()
-
-target_link_libraries(${EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
-target_link_libraries(${LOADABLE_EXTENSION_NAME} ${VAULT_LINK_LIBRARIES})
 
 # Strip symbols from release builds of the loadable extension. This must happen
 # at link time: DuckDB appends signed metadata to the file afterwards. The

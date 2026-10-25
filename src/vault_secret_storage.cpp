@@ -10,7 +10,8 @@
 
 namespace duckdb {
 
-VaultSecretStorage::VaultSecretStorage() : SecretStorage(STORAGE_NAME, VAULT_STORAGE_OFFSET) {
+VaultSecretStorage::VaultSecretStorage(DatabaseInstance &db_p)
+    : SecretStorage(STORAGE_NAME, VAULT_STORAGE_OFFSET), db(db_p) {
 	persistent = true;
 }
 
@@ -64,6 +65,9 @@ optional_ptr<VaultClient> VaultSecretStorage::Connect(optional_ptr<ClientContext
 		if (!client && required) {
 			throw InvalidConfigurationException("Vault secret storage cannot be used without a client connection");
 		}
+		if (client) {
+			client->SetContext(nullptr);
+		}
 		return client.get();
 	}
 	auto config = VaultConfig::FromContext(*context);
@@ -78,11 +82,12 @@ optional_ptr<VaultClient> VaultSecretStorage::Connect(optional_ptr<ClientContext
 	cache_ttl_seconds = config.cache_ttl_seconds;
 	auto new_fingerprint = config.Fingerprint();
 	if (!client || new_fingerprint != fingerprint) {
-		client = make_uniq<VaultClient>(std::move(config));
+		client = make_uniq<VaultClient>(db, std::move(config));
 		fingerprint = new_fingerprint;
 		cache.clear();
 		cache_loaded = false;
 	}
+	client->SetContext(context);
 	return client.get();
 }
 
@@ -236,6 +241,10 @@ unique_ptr<SecretEntry> VaultSecretStorage::StoreSecret(unique_ptr<const BaseSec
 }
 
 vector<SecretEntry> VaultSecretStorage::AllSecrets(optional_ptr<CatalogTransaction> transaction) {
+	if (VaultClient::RequestInProgress()) {
+		// Re-entered while talking to Vault (HTTP secret lookup for the Vault URL): Vault cannot answer that
+		return {};
+	}
 	lock_guard<mutex> guard(lock);
 	vector<SecretEntry> result;
 	auto vault = Connect(GetContext(transaction), false);
@@ -274,6 +283,10 @@ void VaultSecretStorage::DropSecretByName(const Identifier &name_p, OnEntryNotFo
 
 SecretMatch VaultSecretStorage::LookupSecret(const string &path, const string &type,
                                              optional_ptr<CatalogTransaction> transaction) {
+	if (VaultClient::RequestInProgress()) {
+		// Re-entered while talking to Vault (HTTP secret lookup for the Vault URL): Vault cannot answer that
+		return SecretMatch();
+	}
 	lock_guard<mutex> guard(lock);
 	SecretMatch best;
 	auto vault = Connect(GetContext(transaction), false);
@@ -302,6 +315,10 @@ SecretMatch VaultSecretStorage::LookupSecret(const string &path, const string &t
 
 unique_ptr<SecretEntry> VaultSecretStorage::GetSecretByName(const string &name,
                                                             optional_ptr<CatalogTransaction> transaction) {
+	if (VaultClient::RequestInProgress()) {
+		// Re-entered while talking to Vault (HTTP secret lookup for the Vault URL): Vault cannot answer that
+		return nullptr;
+	}
 	lock_guard<mutex> guard(lock);
 	auto vault = Connect(GetContext(transaction), false);
 	if (!vault) {

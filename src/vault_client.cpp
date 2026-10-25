@@ -1,35 +1,25 @@
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
-
 #include "vault_client.hpp"
 #include "vault_json.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/main/extension_helper.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
 #include <fstream>
 #include <sstream>
 
 namespace duckdb {
 
-namespace httplib = duckdb_httplib_openssl;
+//! Set while this thread is inside a Vault HTTP request
+static thread_local bool request_in_progress = false;
 
-struct VaultHTTP {
-	explicit VaultHTTP(const VaultConfig &config) : client(config.addr) {
-		client.set_connection_timeout(10);
-		client.set_read_timeout(30);
-		client.set_write_timeout(30);
-		client.set_keep_alive(true);
-		if (!config.ca_cert.empty()) {
-			client.set_ca_cert_path(config.ca_cert);
-		}
-		client.enable_server_certificate_verification(!config.tls_skip_verify);
-	}
+bool VaultClient::RequestInProgress() {
+	return request_in_progress;
+}
 
-	httplib::Client client;
-};
-
-VaultClient::VaultClient(VaultConfig config_p) : config(std::move(config_p)) {
+VaultClient::VaultClient(DatabaseInstance &db_p, VaultConfig config_p) : db(db_p), config(std::move(config_p)) {
 	if (!config.IsConfigured()) {
 		throw InvalidConfigurationException(
 		    "Vault is not configured: set the vault_addr setting (or the VAULT_ADDR environment variable)");
@@ -37,16 +27,15 @@ VaultClient::VaultClient(VaultConfig config_p) : config(std::move(config_p)) {
 	if (!StringUtil::StartsWith(config.addr, "http://") && !StringUtil::StartsWith(config.addr, "https://")) {
 		throw InvalidConfigurationException("vault_addr must start with http:// or https://, got '%s'", config.addr);
 	}
-	http = make_uniq<VaultHTTP>(config);
-	if (!http->client.is_valid()) {
-		throw InvalidConfigurationException("Invalid vault_addr '%s'", config.addr);
+	// DuckDB's built-in HTTP client only supports GET requests and plain HTTP: Vault needs httpfs
+	if (!ExtensionHelper::TryAutoLoadExtension(db, "httpfs")) {
+		throw MissingExtensionException("The vault extension needs the httpfs extension to talk to Vault. Install and "
+		                                "load it with: INSTALL httpfs; LOAD httpfs;");
 	}
 	if (config.auth_method == VaultAuthMethod::TOKEN) {
 		token = config.token;
 	}
 }
-
-VaultClient::~VaultClient() = default;
 
 string VaultClient::EncodePathSegment(const string &segment) {
 	static const char *hex = "0123456789ABCDEF";
@@ -64,32 +53,56 @@ string VaultClient::EncodePathSegment(const string &segment) {
 }
 
 VaultResponse VaultClient::Send(const string &method, const string &path, const string &body, bool with_token) {
-	httplib::Headers headers;
-	headers.emplace("X-Vault-Request", "true");
+	auto url = config.addr + "/v1/" + path;
+	// Setting up the request looks up HTTP secrets for the URL, which asks the vault storage again
+	struct RequestScope {
+		RequestScope() {
+			request_in_progress = true;
+		}
+		~RequestScope() {
+			request_in_progress = false;
+		}
+	} scope;
+	auto &http_util = HTTPUtil::Get(db);
+	// Parameters from the connection (when there is one) pick up its httpfs settings, e.g. ca_cert_file
+	auto params = context ? http_util.InitializeParameters(*context, url) : http_util.InitializeParameters(db, url);
+
+	HTTPHeaders headers(db);
+	headers.Insert("X-Vault-Request", "true");
 	if (with_token && !token.empty()) {
-		headers.emplace("X-Vault-Token", token);
+		headers.Insert("X-Vault-Token", token);
 	}
 	if (!config.vault_namespace.empty()) {
-		headers.emplace("X-Vault-Namespace", config.vault_namespace);
+		headers.Insert("X-Vault-Namespace", config.vault_namespace);
 	}
-	auto full_path = "/v1/" + path;
-	httplib::Result result;
+
+	unique_ptr<HTTPResponse> response;
 	if (method == "GET") {
-		result = http->client.Get(full_path, headers);
+		GetRequestInfo request(url, headers, *params, nullptr, nullptr);
+		request.try_request = true;
+		response = http_util.Request(request);
 	} else if (method == "POST") {
-		result = http->client.Post(full_path, headers, body, "application/json");
+		headers.Insert("Content-Type", "application/json");
+		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
+		request.try_request = true;
+		response = http_util.Request(request);
+		// httpfs returns the body of a POST response here
+		response->body = std::move(request.buffer_out);
 	} else if (method == "DELETE") {
-		result = http->client.Delete(full_path, headers);
+		DeleteRequestInfo request(url, headers, *params);
+		request.try_request = true;
+		response = http_util.Request(request);
 	} else {
 		throw InternalException("Unsupported Vault HTTP method %s", method);
 	}
-	if (!result) {
-		throw IOException("Failed to connect to Vault at %s: %s", config.addr, httplib::to_string(result.error()));
+	// try_request: failures come back as a response instead of an exception
+	if (response->HasRequestError()) {
+		throw IOException("Failed to connect to Vault at %s: %s", config.addr, response->GetRequestError());
 	}
-	VaultResponse response;
-	response.status = result->status;
-	response.body = result->body;
-	return response;
+	VaultResponse result;
+	result.status = static_cast<int>(response->status);
+	result.body = std::move(response->body);
+	return result;
 }
 
 static string ReadJWTFile(const string &path) {

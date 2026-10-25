@@ -3,7 +3,8 @@
 #   docker compose up -d --wait     # start Vault and run test/vault/setup.sh
 #   docker compose down             # stop (dev mode keeps everything in memory)
 #
-# Vault listens on http://127.0.0.1:8200 with root token "root".
+# Vault listens on http://127.0.0.1:8200 with root token "root". A second Vault (vault-tls) serves HTTPS on
+# https://127.0.0.1:8300 with a self-signed certificate, to test TLS through httpfs.
 # lldap provides the LDAP directory behind Vault's ldap auth method, and k3s (API server only, no nodes) validates
 # the service account tokens used with the kubernetes auth method. Both are only reachable inside the compose network.
 services:
@@ -19,6 +20,21 @@ services:
       - IPC_LOCK
     healthcheck:
       test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  vault-tls:
+    image: hashicorp/vault:1.20
+    command: server -dev -dev-tls -dev-tls-cert-dir=/tmp -dev-listen-address=0.0.0.0:8200
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+    ports:
+      - "${VAULT_TLS_PORT:-8300}:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=https://127.0.0.1:8200", "-tls-skip-verify"]
       interval: 2s
       timeout: 2s
       retries: 30

@@ -99,8 +99,7 @@ static void ValidateCacheTTL(ClientContext &context, SetScope scope, Value &para
 string VaultConfig::Fingerprint() const {
 	// Includes credentials so that changing e.g. the token forces a re-login. Never displayed.
 	return StringUtil::Join(vector<string> {addr, vault_namespace, AuthMethodToString(auth_method), auth_mount, token,
-	                                        username, password, role, jwt, jwt_path, kv_mount, kv_prefix, ca_cert,
-	                                        tls_skip_verify ? "1" : "0"},
+	                                        username, password, role, jwt, jwt_path, kv_mount, kv_prefix},
 	                        "\x1f");
 }
 
@@ -138,10 +137,6 @@ void VaultConfig::RegisterSettings(DBConfig &config) {
 	    LogicalType::VARCHAR, Value("duckdb"));
 	add("vault_cache_ttl_seconds", "How long secrets read from Vault are cached before re-reading (0 disables)",
 	    LogicalType::BIGINT, Value::BIGINT(60), ValidateCacheTTL);
-	add("vault_ca_cert", "CA certificate file used to verify the Vault server (falls back to VAULT_CACERT)",
-	    LogicalType::VARCHAR, Value(""));
-	add("vault_tls_skip_verify", "Disable TLS certificate verification (insecure)", LogicalType::BOOLEAN,
-	    Value::BOOLEAN(false));
 }
 
 static string TrimSlashes(string value) {
@@ -204,11 +199,6 @@ VaultConfig VaultConfig::FromContext(ClientContext &context) {
 	Value ttl;
 	if (context.TryGetCurrentSetting(Identifier("vault_cache_ttl_seconds"), ttl) && !ttl.IsNull()) {
 		result.cache_ttl_seconds = ttl.GetValue<int64_t>();
-	}
-	result.ca_cert = SettingOrEnv(context, "vault_ca_cert", "VAULT_CACERT");
-	Value skip_verify;
-	if (context.TryGetCurrentSetting(Identifier("vault_tls_skip_verify"), skip_verify) && !skip_verify.IsNull()) {
-		result.tls_skip_verify = skip_verify.GetValue<bool>();
 	}
 	return result;
 }

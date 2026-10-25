@@ -21,7 +21,7 @@ public:
 	//! Tie-break offset; must differ from the built-in storages (0, 5, 10, 20)
 	static constexpr int64_t VAULT_STORAGE_OFFSET = 30;
 
-	VaultSecretStorage();
+	explicit VaultSecretStorage(DatabaseInstance &db);
 
 	unique_ptr<SecretEntry> StoreSecret(unique_ptr<const BaseSecret> secret, OnCreateConflict on_conflict,
 	                                    optional_ptr<CatalogTransaction> transaction = nullptr) override;
@@ -55,6 +55,7 @@ private:
 		return transaction ? transaction->context : nullptr;
 	}
 
+	DatabaseInstance &db;
 	mutex lock;
 	string fingerprint;
 	unique_ptr<VaultClient> client;

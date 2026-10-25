@@ -8,7 +8,7 @@ The extension adds a persistent secret storage called `vault`. Secrets created i
 KV v2 secrets engine and read back from there by every DuckDB process pointed at the same Vault.
 
 ```sql
-LOAD vault;
+LOAD vault;   -- also loads httpfs, which the extension uses to talk to Vault
 
 SET vault_addr = 'https://vault.example.com:8200';
 -- token taken from VAULT_TOKEN or ~/.vault-token, see "Authentication" below
@@ -50,8 +50,6 @@ environment variables.
 | `vault_kv_mount` | `secret` | Mount path of the KV v2 engine |
 | `vault_kv_prefix` | `duckdb` | Path inside the mount under which secrets are stored |
 | `vault_cache_ttl_seconds` | `60` | How long secrets read from Vault are cached. `0` reads Vault on every lookup |
-| `vault_ca_cert` | `$VAULT_CACERT` | CA certificate file for verifying Vault's TLS certificate |
-| `vault_tls_skip_verify` | `false` | Disable TLS verification (insecure) |
 
 Settings, including `vault_token` and `vault_password`, are visible in `duckdb_settings()`. Prefer the
 environment variables for credentials.
@@ -62,6 +60,27 @@ environment variables for credentials.
 SELECT * FROM vault_status();
 -- address | namespace | auth_method | kv_path | authenticated | display_name | policies | token_ttl | error
 ```
+
+## HTTP and TLS
+
+Requests to Vault go through DuckDB's HTTP stack, which the [httpfs](https://duckdb.org/docs/stable/core_extensions/httpfs/overview)
+extension provides. The vault extension loads httpfs on first use (with DuckDB's default extension autoloading); if
+autoloading is disabled, run `INSTALL httpfs; LOAD httpfs;` first.
+
+TLS and proxies are therefore configured the same way as for any other HTTP access in DuckDB:
+
+```sql
+-- Trust a private CA (e.g. Vault's own certificate authority)
+SET ca_cert_file = '/etc/vault/ca.pem';
+
+-- Use an HTTP proxy
+SET http_proxy = 'proxy.internal:3128';
+
+-- Turn off certificate verification for the Vault address only (insecure)
+CREATE SECRET vault_tls (TYPE http, VERIFY_SSL false, SCOPE 'https://vault.example.com:8200');
+```
+
+`http` secrets used for the Vault connection itself are only looked up in the other secret storages, never in Vault.
 
 ## Authentication
 
@@ -170,14 +189,17 @@ make            # build/release/duckdb with the extension statically linked
 make test       # unit tests (no Vault needed)
 ```
 
-The only external dependency is OpenSSL (via vcpkg in CI, or system packages locally). HTTP and JSON use the
-libraries bundled with DuckDB.
+The extension itself has no external dependencies: it uses DuckDB's HTTP stack and the JSON library bundled with
+DuckDB. The build also compiles httpfs (pinned in `extension_config.cmake` to the version DuckDB v2.0.0 uses) so the
+tests can load it; httpfs needs OpenSSL and curl (from vcpkg in CI, or e.g. `libssl-dev` and `libcurl4-openssl-dev`
+locally).
 
 ## Integration tests
 
 The tests in `test/sql/integration/` run against a real Vault dev server started by `docker-compose.yml`,
-together with an [lldap](https://github.com/lldap/lldap) LDAP directory for the `ldap` auth method and a
-[k3s](https://k3s.io) Kubernetes API server (no nodes) for the `kubernetes` auth method.
+together with a second Vault serving HTTPS with a self-signed certificate, an [lldap](https://github.com/lldap/lldap)
+LDAP directory for the `ldap` auth method and a [k3s](https://k3s.io) Kubernetes API server (no nodes) for the
+`kubernetes` auth method.
 `test/vault/setup.sh` configures Vault: policies, userpass users (including one with short-lived tokens), a custom
 auth mount, LDAP auth with group-based policies (users and groups in `test/vault/ldap/`), Kubernetes auth with
 service accounts created by `test/vault/k8s/bootstrap.sh` (fresh tokens on every run), JWT auth with a test key,
@@ -202,7 +224,7 @@ VAULT_TEST_ADDR=http://127.0.0.1:8200 VAULT_TEST_TOKEN=root VAULT_TEST_K8S_TOKEN
 ```
 
 Without `VAULT_TEST_ADDR` the integration tests are skipped, so `make test` works without Docker.
-`test/sql/vault_settings.test` expects `VAULT_ADDR` and `VAULT_TOKEN` to be unset.
+`test/sql/vault_settings.test` and `test/sql/vault_client.test` expect `VAULT_ADDR` and `VAULT_TOKEN` to be unset.
 
 The Kubernetes tests pass the service account token through `vault_jwt_path`. The default path inside a pod
 (`/var/run/secrets/kubernetes.io/serviceaccount/token`) is not exercised, since the tests do not run in a pod.

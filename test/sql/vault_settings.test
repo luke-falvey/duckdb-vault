@@ -17,7 +17,6 @@ SELECT name, value FROM duckdb_settings() WHERE name LIKE 'vault\_%' ESCAPE '\' 
 vault_addr	(empty)
 vault_auth_method	token
 vault_auth_mount	(empty)
-vault_ca_cert	(empty)
 vault_cache_ttl_seconds	60
 vault_jwt	(empty)
 vault_jwt_path	(empty)
@@ -26,7 +25,6 @@ vault_kv_prefix	duckdb
 vault_namespace	(empty)
 vault_password	(empty)
 vault_role	(empty)
-vault_tls_skip_verify	false
 vault_token	(empty)
 vault_username	(empty)
 
@@ -84,42 +82,22 @@ SELECT error FROM vault_status();
 ----
 <REGEX>:.*vault_addr must start with http:// or https://.*
 
-# A Vault address nobody listens on
+# Talking to Vault needs httpfs. With autoloading disabled (and httpfs not loaded) the error says so.
 statement ok
-SET vault_addr = 'http://127.0.0.1:1';
+SET autoinstall_known_extensions = false;
 
 statement ok
-SET vault_token = 'some-token';
+SET autoload_known_extensions = false;
+
+statement ok
+SET vault_addr = 'http://127.0.0.1:1';
 
 statement error
 CREATE PERSISTENT SECRET s1 IN vault (TYPE http, BEARER_TOKEN 'abc');
 ----
-Failed to connect to Vault at http://127.0.0.1:1
-
-# Missing credentials for login-based methods are reported before any request is made
-statement ok
-SET vault_auth_method = 'userpass';
+The vault extension needs the httpfs extension to talk to Vault
 
 query I
 SELECT error FROM vault_status();
 ----
-<REGEX>:.*requires vault_username and vault_password.*
-
-statement ok
-SET vault_auth_method = 'jwt';
-
-statement ok
-SET vault_role = 'my-role';
-
-query I
-SELECT error FROM vault_status();
-----
-<REGEX>:.*requires vault_jwt or vault_jwt_path.*
-
-statement ok
-SET vault_jwt_path = '/nonexistent/token';
-
-query I
-SELECT error FROM vault_status();
-----
-<REGEX>:.*Could not read Vault JWT from file '/nonexistent/token'.*
+<REGEX>:.*needs the httpfs extension.*

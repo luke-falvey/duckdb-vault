@@ -60,7 +60,8 @@ static void VaultStatusFunction(ClientContext &context, TableFunctionInput &data
 	VaultTokenInfo info;
 	string error;
 	try {
-		VaultClient client(config);
+		VaultClient client(DatabaseInstance::GetDatabase(context), config);
+		client.SetContext(context);
 		info = client.LookupSelf();
 	} catch (std::exception &ex) {
 		error = ErrorData(ex).RawMessage();
@@ -81,7 +82,7 @@ static void VaultStatusFunction(ClientContext &context, TableFunctionInput &data
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	VaultConfig::RegisterSettings(DBConfig::GetConfig(db));
-	SecretManager::Get(db).LoadSecretStorage(make_uniq<VaultSecretStorage>());
+	SecretManager::Get(db).LoadSecretStorage(make_uniq<VaultSecretStorage>(db));
 
 	loader.RegisterFunction(TableFunction("vault_status", {}, VaultStatusFunction, VaultStatusBind, VaultStatusInit));
 	loader.SetDescription("Store and read DuckDB secrets in HashiCorp Vault");
