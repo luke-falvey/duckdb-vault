@@ -1,0 +1,47 @@
+#
+# Builds the extension and runs the integration tests against a Vault server started with docker compose
+#
+name: Vault Integration Tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' && github.sha || '' }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Integration tests (Vault)
+    runs-on: ubuntu-latest
+    env:
+      GEN: ninja
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: 'true'
+
+      - name: Install build dependencies
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build ccache libssl-dev
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-integration-${{ github.sha }}
+          restore-keys: ccache-integration-
+
+      - name: Build
+        run: make release
+
+      - name: Unit tests
+        run: make test
+
+      - name: Integration tests
+        run: ./scripts/run-integration-tests.sh
+
+      - name: Vault logs
+        if: failure()
+        run: docker compose logs vault lldap k3s

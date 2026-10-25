@@ -1,0 +1,225 @@
+# name: test/sql/integration/vault_storage.test
+# description: Create, read, replace and drop DuckDB secrets in a real Vault server.
+# group: [integration]
+
+# Needs a Vault server: see scripts/run-integration-tests.sh
+
+require vault
+
+require-env VAULT_TEST_ADDR
+
+require-env VAULT_TEST_TOKEN
+
+statement ok
+SET vault_addr = '{VAULT_TEST_ADDR}';
+
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+statement ok
+SET vault_kv_prefix = 'it_storage';
+
+# Read through to Vault on every access, so the test sees its own writes and nothing stale
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+# Clean up leftovers from a previous run against the same server
+statement ok
+DROP PERSISTENT SECRET IF EXISTS api_token FROM vault;
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS api_token_other FROM vault;
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS typed_http FROM vault;
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS default_storage_secret FROM vault;
+
+query I
+SELECT authenticated FROM vault_status();
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+0
+
+# --- create ------------------------------------------------------------------
+statement ok
+CREATE PERSISTENT SECRET api_token IN vault (TYPE http, BEARER_TOKEN 'token-1', SCOPE 'https://api.example.com');
+
+query IIIII
+SELECT name, type, provider, persistent, storage FROM duckdb_secrets() WHERE storage = 'vault';
+----
+api_token	http	config	true	vault
+
+query I
+SELECT scope FROM duckdb_secrets() WHERE name = 'api_token';
+----
+['https://api.example.com']
+
+# Sensitive values are redacted when displayed
+query I
+SELECT secret_string FROM duckdb_secrets() WHERE name = 'api_token';
+----
+name=api_token;type=http;provider=config;serializable=true;scope=https://api.example.com;bearer_token=redacted
+
+# Lookups by path pick up the Vault secret
+query III
+SELECT name, persistent, storage FROM which_secret('https://api.example.com/v1/data.json', 'http');
+----
+api_token	PERSISTENT	vault
+
+query I
+SELECT count(*) FROM which_secret('https://elsewhere.example.com/data.json', 'http');
+----
+0
+
+# --- conflicts ---------------------------------------------------------------
+statement error
+CREATE PERSISTENT SECRET api_token IN vault (TYPE http, BEARER_TOKEN 'token-2');
+----
+Persistent secret with name api_token already exists in secret storage 'vault'!
+
+statement ok
+CREATE PERSISTENT SECRET IF NOT EXISTS api_token IN vault (TYPE http, BEARER_TOKEN 'token-2');
+
+query I
+SELECT secret_string LIKE '%scope=https://api.example.com;%' FROM duckdb_secrets() WHERE name = 'api_token';
+----
+true
+
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET api_token IN vault (TYPE http, BEARER_TOKEN 'token-3', SCOPE 'https://new.example.com');
+
+query I
+SELECT scope FROM duckdb_secrets() WHERE name = 'api_token';
+----
+['https://new.example.com']
+
+# --- longest scope wins, across storages -------------------------------------
+statement ok
+CREATE PERSISTENT SECRET api_token_other IN vault (TYPE http, BEARER_TOKEN 'other', SCOPE 'https://new.example.com/special');
+
+statement ok
+CREATE SECRET temp_http (TYPE http, BEARER_TOKEN 'temp', SCOPE 'https://new.example.com/special/deeper');
+
+query II
+SELECT name, storage FROM which_secret('https://new.example.com/file', 'http');
+----
+api_token	vault
+
+query II
+SELECT name, storage FROM which_secret('https://new.example.com/special/file', 'http');
+----
+api_token_other	vault
+
+query II
+SELECT name, storage FROM which_secret('https://new.example.com/special/deeper/file', 'http');
+----
+temp_http	memory
+
+# --- typed values round-trip --------------------------------------------------
+statement ok
+CREATE PERSISTENT SECRET typed_http IN vault (
+    TYPE http,
+    VERIFY_SSL false,
+    HTTP_PROXY 'proxy.internal:3128',
+    EXTRA_HTTP_HEADERS MAP {'X-Api-Key': 'k=1;2', 'Accept': 'application/json'},
+    SCOPE 'https://typed.example.com'
+);
+
+# Restart: everything below must come from Vault, not from a cache
+restart
+
+statement ok
+SET vault_addr = '{VAULT_TEST_ADDR}';
+
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+statement ok
+SET vault_kv_prefix = 'it_storage';
+
+query I
+SELECT name FROM duckdb_secrets() WHERE storage = 'vault' ORDER BY name;
+----
+api_token
+api_token_other
+typed_http
+
+query I
+SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'typed_http';
+----
+name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers={X-Api-Key='k=1;2', Accept=application/json};http_proxy=proxy.internal:3128;verify_ssl=false
+
+# extra_http_headers is redacted; http_proxy and verify_ssl are not
+query I
+SELECT secret_string FROM duckdb_secrets() WHERE name = 'typed_http';
+----
+name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers=redacted;http_proxy=proxy.internal:3128;verify_ssl=false
+
+# --- drop --------------------------------------------------------------------
+statement ok
+DROP PERSISTENT SECRET api_token_other FROM vault;
+
+statement error
+DROP PERSISTENT SECRET api_token_other FROM vault;
+----
+Failed to remove non-existent persistent secret 'api_token_other' in secret storage 'vault'
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS api_token_other FROM vault;
+
+# DROP without FROM finds the secret in Vault
+statement ok
+DROP PERSISTENT SECRET typed_http;
+
+query I
+SELECT name FROM duckdb_secrets() WHERE storage = 'vault' ORDER BY name;
+----
+api_token
+
+# A dropped name can be created again
+statement ok
+CREATE PERSISTENT SECRET api_token_other IN vault (TYPE http, BEARER_TOKEN 'again');
+
+statement ok
+DROP PERSISTENT SECRET api_token_other FROM vault;
+
+# --- Vault as the default persistent storage ---------------------------------
+statement ok
+SET default_secret_storage = 'vault';
+
+statement ok
+CREATE PERSISTENT SECRET default_storage_secret (TYPE http, BEARER_TOKEN 'via-default');
+
+query II
+SELECT name, storage FROM duckdb_secrets() WHERE name = 'default_storage_secret';
+----
+default_storage_secret	vault
+
+statement ok
+DROP PERSISTENT SECRET default_storage_secret;
+
+statement ok
+DROP PERSISTENT SECRET api_token;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+0
+
+# Names that cannot be Vault keys are rejected
+statement error
+CREATE PERSISTENT SECRET "a/b" IN vault (TYPE http);
+----
+must not contain '/'
+
+# Temporary secrets cannot go to Vault
+statement error
+CREATE TEMPORARY SECRET tmp IN vault (TYPE http);
+----
+Cannot create temporary secrets in a persistent secret storage!

@@ -1,0 +1,6 @@
+{
+  "id": "ldap-alice",
+  "email": "ldap-alice@example.com",
+  "password": "alice-ldap-password",
+  "groups": ["duckdb-users"]
+}

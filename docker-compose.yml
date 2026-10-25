@@ -1,0 +1,101 @@
+# Vault dev server for the integration tests (see scripts/run-integration-tests.sh).
+#
+#   docker compose up -d --wait     # start Vault and run test/vault/setup.sh
+#   docker compose down             # stop (dev mode keeps everything in memory)
+#
+# Vault listens on http://127.0.0.1:8200 with root token "root".
+# lldap provides the LDAP directory behind Vault's ldap auth method, and k3s (API server only, no nodes) validates
+# the service account tokens used with the kubernetes auth method. Both are only reachable inside the compose network.
+services:
+  vault:
+    image: hashicorp/vault:1.20
+    command: server -dev
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "${VAULT_PORT:-8200}:8200"
+    cap_add:
+      - IPC_LOCK
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  lldap:
+    image: lldap/lldap:stable
+    environment:
+      LLDAP_JWT_SECRET: test-only-jwt-secret
+      LLDAP_KEY_SEED: test-only-key-seed
+      LLDAP_LDAP_BASE_DN: dc=example,dc=com
+      LLDAP_LDAP_USER_PASS: lldap-admin-password
+    healthcheck:
+      test: ["CMD", "/app/lldap", "healthcheck", "--config-file", "/data/lldap_config.toml"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # One-shot container that creates the LDAP users and groups in test/vault/ldap
+  lldap-bootstrap:
+    image: lldap/lldap:stable
+    depends_on:
+      lldap:
+        condition: service_healthy
+    entrypoint: ["/app/bootstrap.sh"]
+    environment:
+      LLDAP_URL: http://lldap:17170
+      LLDAP_ADMIN_USERNAME: admin
+      LLDAP_ADMIN_PASSWORD: lldap-admin-password
+      USER_CONFIGS_DIR: /bootstrap/user-configs
+      GROUP_CONFIGS_DIR: /bootstrap/group-configs
+    volumes:
+      - ./test/vault/ldap/users:/bootstrap/user-configs:ro
+      - ./test/vault/ldap/groups:/bootstrap/group-configs:ro
+
+  # Kubernetes API server only: enough for Vault to validate service account tokens (TokenReview)
+  k3s:
+    image: rancher/k3s:v1.33.1-k3s1
+    command: server --disable-agent --tls-san k3s --write-kubeconfig-mode 644
+    environment:
+      K3S_KUBECONFIG_OUTPUT: /kube/kubeconfig.yaml
+      KUBECONFIG: /kube/kubeconfig.yaml
+    volumes:
+      - k3s-kubeconfig:/kube
+    healthcheck:
+      test: ["CMD", "kubectl", "get", "--raw", "/readyz"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # One-shot container that creates service accounts and writes their tokens to test/vault/k8s/generated
+  k8s-bootstrap:
+    image: rancher/k3s:v1.33.1-k3s1
+    depends_on:
+      k3s:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/bootstrap/bootstrap.sh"]
+    volumes:
+      - k3s-kubeconfig:/kube:ro
+      - ./test/vault/k8s/bootstrap.sh:/bootstrap/bootstrap.sh:ro
+      - ./test/vault/k8s/generated:/out
+
+  # One-shot container that configures auth methods, policies and seed data
+  vault-setup:
+    image: hashicorp/vault:1.20
+    depends_on:
+      vault:
+        condition: service_healthy
+      lldap-bootstrap:
+        condition: service_completed_successfully
+      k8s-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      VAULT_ADDR: http://vault:8200
+      VAULT_TOKEN: root
+    volumes:
+      - ./test/vault:/setup:ro
+    entrypoint: ["/bin/sh", "/setup/setup.sh"]
+
+volumes:
+  k3s-kubeconfig:

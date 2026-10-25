@@ -1,0 +1,5 @@
+{
+  "id": "ldap-bob",
+  "email": "ldap-bob@example.com",
+  "password": "bob-ldap-password"
+}

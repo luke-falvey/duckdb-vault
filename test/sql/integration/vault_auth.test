@@ -1,0 +1,233 @@
+# name: test/sql/integration/vault_auth.test
+# description: Vault authentication methods against a real Vault server configured by test/vault/setup.sh
+# group: [integration]
+
+require vault
+
+require-env VAULT_TEST_ADDR
+
+require-env VAULT_TEST_TOKEN
+
+statement ok
+SET vault_addr = '{VAULT_TEST_ADDR}';
+
+statement ok
+SET vault_kv_prefix = 'it_auth';
+
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+# --- token -------------------------------------------------------------------
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+query IIII
+SELECT auth_method, authenticated, display_name, list_contains(policies, 'root') FROM vault_status();
+----
+token	true	token	true
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS auth_secret FROM vault;
+
+statement ok
+CREATE PERSISTENT SECRET auth_secret IN vault (TYPE http, BEARER_TOKEN 'shared');
+
+statement ok
+SET vault_token = 'not-a-valid-token';
+
+query II
+SELECT authenticated, error LIKE '%permission denied%' FROM vault_status();
+----
+false	true
+
+statement error
+FROM duckdb_secrets();
+----
+<REGEX>:.*Permission Error: Vault: failed to list secrets \(HTTP 403.*permission denied.*
+
+# --- userpass ----------------------------------------------------------------
+statement ok
+SET vault_auth_method = 'userpass';
+
+statement ok
+SET vault_username = 'duckdb';
+
+statement ok
+SET vault_password = 'duckdb-password';
+
+query IIII
+SELECT auth_method, authenticated, display_name, list_contains(policies, 'duckdb-rw') FROM vault_status();
+----
+userpass	true	userpass-duckdb	true
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+auth_secret	vault
+
+statement ok
+SET vault_password = 'wrong-password';
+
+query II
+SELECT authenticated, error LIKE '%invalid username or password%' FROM vault_status();
+----
+false	true
+
+statement error
+FROM duckdb_secrets();
+----
+<REGEX>:.*Vault: failed to log in with auth method 'userpass'.*invalid username or password.*
+
+# --- userpass on a custom mount path -----------------------------------------
+statement ok
+SET vault_auth_mount = 'corp-users';
+
+statement ok
+SET vault_username = 'alice';
+
+statement ok
+SET vault_password = 'alice-password';
+
+query II
+SELECT authenticated, display_name FROM vault_status();
+----
+true	corp-users-alice
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+statement ok
+RESET vault_auth_mount;
+
+# --- read-only policy: reads work, writes are denied ---------------------------
+statement ok
+SET vault_username = 'readonly';
+
+statement ok
+SET vault_password = 'readonly-password';
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+statement error
+CREATE PERSISTENT SECRET ro_secret IN vault (TYPE http, BEARER_TOKEN 'nope');
+----
+<REGEX>:.*Permission Error: Vault: failed to write secret 'ro_secret'.*permission denied.*
+
+statement error
+DROP PERSISTENT SECRET auth_secret FROM vault;
+----
+<REGEX>:.*Permission Error: Vault: failed to delete secret 'auth_secret'.*permission denied.*
+
+# --- expiring tokens are renewed by logging in again ---------------------------
+statement ok
+SET vault_username = 'shortlived';
+
+statement ok
+SET vault_password = 'shortlived-password';
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+# The token has a 3 second TTL
+sleep 4 seconds
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+# --- ldap (users and groups in test/vault/ldap, served by lldap) ------------
+statement ok
+SET vault_auth_method = 'ldap';
+
+statement ok
+SET vault_username = 'ldap-alice';
+
+statement ok
+SET vault_password = 'alice-ldap-password';
+
+# The duckdb-rw policy comes from membership of the LDAP group duckdb-users
+query IIII
+SELECT auth_method, authenticated, display_name, list_contains(policies, 'duckdb-rw') FROM vault_status();
+----
+ldap	true	ldap-ldap-alice	true
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+statement ok
+SET vault_password = 'wrong-password';
+
+query II
+SELECT authenticated, error LIKE '%Vault: failed to log in with auth method ''ldap''%' FROM vault_status();
+----
+false	true
+
+statement error
+FROM duckdb_secrets();
+----
+<REGEX>:.*Vault: failed to log in with auth method 'ldap'.*
+
+# ldap-bob is not in any LDAP group: login works but he cannot see the secrets
+statement ok
+SET vault_username = 'ldap-bob';
+
+statement ok
+SET vault_password = 'bob-ldap-password';
+
+query III
+SELECT authenticated, display_name, list_contains(policies, 'duckdb-rw') FROM vault_status();
+----
+true	ldap-ldap-bob	false
+
+statement error
+FROM duckdb_secrets();
+----
+<REGEX>:.*Permission Error: Vault: failed to list secrets \(HTTP 403.*permission denied.*
+
+# --- jwt ---------------------------------------------------------------------
+statement ok
+SET vault_auth_method = 'jwt';
+
+statement ok
+SET vault_role = 'duckdb';
+
+statement ok
+SET vault_jwt_path = 'test/vault/test.jwt';
+
+query III
+SELECT auth_method, authenticated, display_name FROM vault_status();
+----
+jwt	true	jwt-duckdb-ci
+
+query I
+SELECT name FROM duckdb_secrets();
+----
+auth_secret
+
+statement ok
+SET vault_role = 'no-such-role';
+
+query II
+SELECT authenticated, error LIKE '%role "no-such-role" could not be found%' FROM vault_status();
+----
+false	true
+
+# --- clean up with the root token --------------------------------------------
+statement ok
+SET vault_auth_method = 'token';
+
+statement ok
+SET vault_token = '{VAULT_TEST_TOKEN}';
+
+statement ok
+DROP PERSISTENT SECRET auth_secret FROM vault;
