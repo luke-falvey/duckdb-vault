@@ -83,6 +83,23 @@ public:
 		return result;
 	}
 
+	//! The string members of an object, in order
+	static vector<pair<string, string>> GetStringMembers(val_t obj) {
+		using namespace duckdb_yyjson; // NOLINT: the foreach macro uses unqualified names
+		vector<pair<string, string>> result;
+		if (!obj || !yyjson_is_obj(obj)) {
+			return result;
+		}
+		size_t idx, max;
+		val_t key, value;
+		yyjson_obj_foreach(obj, idx, max, key, value) {
+			if (IsString(value)) {
+				result.emplace_back(AsString(key), AsString(value));
+			}
+		}
+		return result;
+	}
+
 private:
 	duckdb_yyjson::yyjson_doc *doc = nullptr;
 };

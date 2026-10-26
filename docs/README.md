@@ -123,9 +123,21 @@ $ vault kv get -format=json secret/duckdb/my_s3 | jq .data.data
 }
 ```
 
+DuckDB marks every secret it writes with the KV custom metadata `duckdb=true`:
+
+```
+$ vault kv metadata get -format=json secret/duckdb/my_s3 | jq .data.custom_metadata
+{
+  "duckdb": "true"
+}
+```
+
+Only entries carrying this marker are DuckDB secrets. Other applications can keep their own entries under the same
+path: DuckDB never lists, overwrites or deletes an unmarked entry, even one shaped like a DuckDB secret.
+
 | Field | Content |
 |---|---|
-| `type` | Secret type (`s3`, `gcs`, `http`, …). **Required**: entries without it are ignored |
+| `type` | Secret type (`s3`, `gcs`, `http`, …). **Required** |
 | `provider` | Secret provider, default `config` |
 | `scope` | List of scope prefixes |
 | any other field | One secret value, stored as the matching JSON type (below) |
@@ -145,14 +157,19 @@ under one of those names cannot be stored either.
 
 ### Writing secrets with the Vault CLI
 
-Entries can be written by hand. Only `type` is required. `vault kv put key=value` stores every value as a string,
-which works for text and for booleans (`use_ssl=true`); `scope` may be comma-separated:
+Entries can be written by hand. Only `type` is required, and the entry must be marked as a DuckDB secret.
+`vault kv put key=value` stores every value as a string, which works for text and for booleans (`use_ssl=true`);
+`scope` may be comma-separated:
 
 ```sh
 vault kv put secret/duckdb/analytics_s3 \
     type=s3 scope='s3://analytics,s3://analytics-archive' \
     key_id=AKIA... secret=... region=eu-west-1 use_ssl=true
+vault kv metadata put -custom-metadata=duckdb=true secret/duckdb/analytics_s3
 ```
+
+`vault kv metadata put -custom-metadata=...` replaces all custom metadata on the entry; include any other keys it
+already has.
 
 Maps such as `extra_http_headers` must be JSON objects, so write those entries as JSON:
 
@@ -160,6 +177,7 @@ Maps such as `extra_http_headers` must be JSON objects, so write those entries a
 vault kv put secret/duckdb/api - <<'EOF'
 {"type": "http", "bearer_token": "...", "extra_http_headers": {"X-Api-Key": "..."}}
 EOF
+vault kv metadata put -custom-metadata=duckdb=true secret/duckdb/api
 ```
 
 `duckdb_secrets()` shows every value as `redacted` except well-known non-sensitive keys (`region`, `endpoint`,
@@ -167,11 +185,15 @@ EOF
 
 ### Behaviour
 
-- `CREATE` uses KV check-and-set, so it fails if the secret already exists. `IF NOT EXISTS` and `OR REPLACE` work
-  as usual. A soft-deleted entry (`vault kv delete`) can be created again.
-- `DROP` deletes the entry's metadata, which removes all its versions.
-- Every entry under `<vault_kv_mount>/<vault_kv_prefix>/` that has a `type` field is read as a DuckDB secret, so keep
-  that path for DuckDB secrets only.
+- `CREATE` fails if the secret already exists; `IF NOT EXISTS` and `OR REPLACE` work as usual. Writes use KV
+  check-and-set against the version DuckDB just read, so a concurrent change makes the statement fail rather than
+  being overwritten. A soft-deleted DuckDB secret (`vault kv delete`) can be created again.
+- Creating a secret whose name is taken by an unmarked entry fails with "a Vault entry that is not a DuckDB secret
+  already exists", including with `OR REPLACE` and `IF NOT EXISTS`, and even if that entry is soft-deleted.
+- `DROP` deletes the entry's metadata, which removes all its versions. An unmarked entry is treated as non-existent
+  and never deleted.
+- A secret is written first and marked afterwards. If marking fails, the statement fails with an error saying so,
+  and `CREATE OR REPLACE` retries.
 - Changes made directly in Vault are picked up after `vault_cache_ttl_seconds`.
 - Writes go to Vault right away and are not rolled back with the DuckDB transaction, the same as local
   persistent secrets.
@@ -184,12 +206,12 @@ DuckDB needs these capabilities on its KV path (defaults shown):
 
 ```hcl
 path "secret/data/duckdb/*"     { capabilities = ["create", "read", "update"] }
-path "secret/metadata/duckdb/*" { capabilities = ["read", "list", "delete"] }
+path "secret/metadata/duckdb/*" { capabilities = ["create", "read", "update", "list", "delete"] }
 path "secret/metadata/duckdb"   { capabilities = ["list"] }
 ```
 
-Read-only access (`read` on `data/`, `read`/`list` on `metadata/`) is enough to use secrets without creating or
-dropping them.
+`create`/`update` on `metadata/` are needed to mark new secrets. Read-only access (`read` on `data/`, `read`/`list`
+on `metadata/`) is enough to use secrets without creating or dropping them.
 
 ## Building
 

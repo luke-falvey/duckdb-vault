@@ -41,10 +41,21 @@ private:
 	void EnsureLoaded(VaultClient &client);
 	//! Read one secret from Vault (nullptr if missing or not a DuckDB secret)
 	unique_ptr<SecretEntry> FetchSecret(VaultClient &client, const string &name);
-	//! Whether a current (non-deleted) KV version exists at the secret's path
-	bool SecretExists(VaultClient &client, const string &name);
-	//! Write the secret; returns false on a check-and-set conflict (the secret exists and cas was requested)
-	bool WriteSecret(VaultClient &client, const BaseSecret &secret, const string &name, bool create_only);
+	//! What is stored at the secret's path, from its KV metadata
+	struct EntryState {
+		//! Metadata exists: the path is taken, even if its latest version is deleted
+		bool has_metadata = false;
+		//! The latest version exists and is not deleted
+		bool exists = false;
+		//! Marked as a DuckDB secret
+		bool is_duckdb = false;
+		int64_t current_version = 0;
+		vector<pair<string, string>> custom_metadata;
+	};
+	EntryState ReadEntryState(VaultClient &client, const string &name);
+	//! Write and mark the secret. Returns false when a DuckDB secret already exists and replace is false. Never
+	//! touches entries that are not DuckDB secrets.
+	bool WriteSecret(VaultClient &client, const BaseSecret &secret, const string &name, bool replace);
 
 	string DataPath(const VaultConfig &config, const string &name) const;
 	string MetadataPath(const VaultConfig &config, const string &name) const;
