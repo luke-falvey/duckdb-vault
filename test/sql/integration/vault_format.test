@@ -21,7 +21,7 @@ SET vault_cache_ttl_seconds = 0;
 
 # test/vault/setup.sh seeds secret/it_handwritten/ with:
 #   manual_http          a DuckDB secret written with `vault kv put` (string values only)
-#   not_a_duckdb_secret  an unrelated entry without duckdb_type
+#   not_a_duckdb_secret  an unrelated entry without type
 #   deleted_http         a soft-deleted entry
 statement ok
 SET vault_kv_prefix = 'it_handwritten';
@@ -36,7 +36,7 @@ SELECT scope FROM duckdb_secrets();
 ----
 ['https://api.example.com', 'https://other.example.com']
 
-# No duckdb_redact_keys field: everything except known non-sensitive keys is redacted
+# Everything except known non-sensitive keys is redacted
 query I
 SELECT secret_string FROM duckdb_secrets();
 ----

@@ -16,7 +16,6 @@ void VaultSecretFormat::Serialize(const BaseSecret &secret, JSONBuilder &builder
 
 	builder.AddString(target, TYPE_FIELD, secret.GetType().GetIdentifierName());
 	builder.AddString(target, PROVIDER_FIELD, secret.GetProvider().GetIdentifierName());
-	builder.AddString(target, VERSION_FIELD, FORMAT_VERSION);
 
 	auto scope = builder.NewArray();
 	for (auto &prefix : secret.GetScope()) {
@@ -24,18 +23,11 @@ void VaultSecretFormat::Serialize(const BaseSecret &secret, JSONBuilder &builder
 	}
 	builder.AddValue(target, SCOPE_FIELD, scope);
 
-	auto redact = builder.NewArray();
-	for (auto &key : kv_secret->redact_keys) {
-		builder.Append(redact, StringUtil::Lower(key.GetIdentifierName()));
-	}
-	builder.AddValue(target, REDACT_FIELD, redact);
-
 	auto types = builder.NewObject();
 	for (auto &entry : kv_secret->secret_map) {
 		auto key = StringUtil::Lower(entry.first.GetIdentifierName());
-		if (StringUtil::StartsWith(key, RESERVED_PREFIX)) {
-			throw InvalidInputException("Secret key '%s' cannot be stored in Vault: the '%s' prefix is reserved", key,
-			                            RESERVED_PREFIX);
+		if (IsReservedField(key)) {
+			throw InvalidInputException("Secret key '%s' cannot be stored in Vault: the field name is reserved", key);
 		}
 		auto &value = entry.second;
 		if (value.type().id() != LogicalTypeId::VARCHAR) {
@@ -78,7 +70,7 @@ static vector<string> ParseList(JSONReader::val_t val) {
 	return JSONReader::GetStringArray(val);
 }
 
-//! Parse the duckdb_types field: JSON object or JSON object text
+//! Parse the types field: JSON object or JSON object text
 static case_insensitive_map_t<string> ParseTypes(JSONReader::val_t val) {
 	case_insensitive_map_t<string> result;
 	if (!val) {
@@ -151,6 +143,19 @@ static Value ToValue(JSONReader::val_t val, const string *declared_type) {
 	return Value(result.ToString()).DefaultCastAs(type, true);
 }
 
+bool VaultSecretFormat::IsReservedField(const string &key) {
+	return key == TYPE_FIELD || key == PROVIDER_FIELD || key == SCOPE_FIELD || key == TYPES_FIELD;
+}
+
+void VaultSecretFormat::SetRedactKeys(KeyValueSecret &secret) {
+	secret.redact_keys.clear();
+	for (auto &entry : secret.secret_map) {
+		if (!IsNonSensitiveKey(entry.first.GetIdentifierName())) {
+			secret.redact_keys.insert(entry.first);
+		}
+	}
+}
+
 bool VaultSecretFormat::IsNonSensitiveKey(const string &key) {
 	static const case_insensitive_set_t non_sensitive {"region",
 	                                                   "endpoint",
@@ -189,7 +194,6 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 	}
 	auto scope = ParseList(JSONReader::Get(data, SCOPE_FIELD));
 	auto types = ParseTypes(JSONReader::Get(data, TYPES_FIELD));
-	auto redact_field = JSONReader::Get(data, REDACT_FIELD);
 
 	auto result = make_uniq<KeyValueSecret>(scope, Identifier(StringUtil::Lower(type)),
 	                                        Identifier(StringUtil::Lower(provider)), Identifier(name));
@@ -198,7 +202,7 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 	yyjson_val *key_val, *field;
 	yyjson_obj_foreach(data, idx, max, key_val, field) {
 		auto key = StringUtil::Lower(JSONReader::AsString(key_val));
-		if (StringUtil::StartsWith(key, RESERVED_PREFIX)) {
+		if (IsReservedField(key)) {
 			continue;
 		}
 		auto type_entry = types.find(key);
@@ -210,15 +214,8 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 			throw InvalidInputException("Vault secret '%s': could not read field '%s': %s", name, key,
 			                            error.RawMessage());
 		}
-		if (!redact_field && !IsNonSensitiveKey(key)) {
-			result->redact_keys.insert(Identifier(key));
-		}
 	}
-	if (redact_field) {
-		for (auto &key : ParseList(redact_field)) {
-			result->redact_keys.insert(Identifier(StringUtil::Lower(key)));
-		}
-	}
+	SetRedactKeys(*result);
 	return std::move(result);
 }
 

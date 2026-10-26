@@ -68,15 +68,15 @@ vault write auth/jwt/role/duckdb role_type=jwt bound_audiences=duckdb-vault user
 
 # --- Seed data: entries written by hand, the way an operator would ---------
 vault kv put secret/it_handwritten/manual_http \
-	duckdb_type=http \
-	duckdb_scope='https://api.example.com,https://other.example.com' \
-	duckdb_types='{"verify_ssl":"BOOLEAN"}' \
+	type=http \
+	scope='https://api.example.com,https://other.example.com' \
+	types='{"verify_ssl":"BOOLEAN"}' \
 	bearer_token=hand-written-token \
 	verify_ssl=false
-# Not a DuckDB secret (no duckdb_type): must be ignored
+# Not a DuckDB secret (no type): must be ignored
 vault kv put secret/it_handwritten/not_a_duckdb_secret foo=bar
 # Soft-deleted entry: must not show up
-vault kv put secret/it_handwritten/deleted_http duckdb_type=http bearer_token=gone
+vault kv put secret/it_handwritten/deleted_http type=http bearer_token=gone
 vault kv delete secret/it_handwritten/deleted_http
 
 echo "Vault configured"

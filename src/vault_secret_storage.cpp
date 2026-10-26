@@ -229,7 +229,8 @@ unique_ptr<SecretEntry> VaultSecretStorage::StoreSecret(unique_ptr<const BaseSec
 	if (kv_secret) {
 		KeyValueSecret renamed(kv_secret->GetScope(), kv_secret->GetType(), kv_secret->GetProvider(), Identifier(name));
 		renamed.secret_map = kv_secret->secret_map;
-		renamed.redact_keys = kv_secret->redact_keys;
+		// Redact the same way as when the secret is read back from Vault
+		VaultSecretFormat::SetRedactKeys(renamed);
 		entry = MakeEntry(renamed);
 	} else {
 		entry = MakeEntry(*stored);

@@ -18,11 +18,10 @@ with urllib.request.urlopen(request) as response:
     data = json.load(response)["data"]["data"]
 
 expected = {
-    "duckdb_type": "http",
-    "duckdb_provider": "config",
-    "duckdb_format_version": "1",
-    "duckdb_scope": ["https://format.example.com"],
-    "duckdb_types": {"verify_ssl": "BOOLEAN", "extra_http_headers": "MAP(VARCHAR, VARCHAR)"},
+    "type": "http",
+    "provider": "config",
+    "scope": ["https://format.example.com"],
+    "types": {"verify_ssl": "BOOLEAN", "extra_http_headers": "MAP(VARCHAR, VARCHAR)"},
     "bearer_token": "format-token",
     "verify_ssl": "true",
     "extra_http_headers": "{X-A=b}",
@@ -32,11 +31,7 @@ for key, value in expected.items():
     if data.get(key) != value:
         errors.append(f"  {key}: expected {value!r}, got {data.get(key)!r}")
 
-redact = set(data.get("duckdb_redact_keys", []))
-if not {"bearer_token", "extra_http_headers"} <= redact:
-    errors.append(f"  duckdb_redact_keys: expected bearer_token and extra_http_headers, got {sorted(redact)}")
-
-extra = set(data) - set(expected) - {"duckdb_redact_keys"}
+extra = set(data) - set(expected)
 if extra:
     errors.append(f"  unexpected fields: {sorted(extra)}")
 

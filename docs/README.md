@@ -112,56 +112,55 @@ lower-case). With the defaults, `CREATE PERSISTENT SECRET my_s3 IN vault (...)` 
 
 ```
 $ vault kv get secret/duckdb/my_s3
-========== Data ==========
-Key                      Value
----                      -----
-duckdb_format_version    1
-duckdb_provider          config
-duckdb_redact_keys       [secret session_token]
-duckdb_scope             [s3://my-bucket]
-duckdb_type              s3
-duckdb_types             map[use_ssl:BOOLEAN]
-key_id                   AKIA...
-region                   eu-west-1
-secret                   wJalr...
-use_ssl                  true
+======= Data =======
+Key               Value
+---               -----
+provider          config
+scope             [s3://my-bucket]
+type              s3
+types             map[use_ssl:BOOLEAN]
+key_id            AKIA...
+region            eu-west-1
+secret            wJalr...
+use_ssl           true
 ```
 
 | Field | Content |
 |---|---|
-| `duckdb_type` | Secret type (`s3`, `gcs`, `http`, …). **Required**: entries without it are ignored |
-| `duckdb_provider` | Secret provider, default `config` |
-| `duckdb_scope` | List of scope prefixes |
-| `duckdb_types` | Map of key → DuckDB type, for values that are not `VARCHAR` |
-| `duckdb_redact_keys` | Keys shown as `redacted` in `duckdb_secrets()` |
-| `duckdb_format_version` | `1` |
+| `type` | Secret type (`s3`, `gcs`, `http`, …). **Required**: entries without it are ignored |
+| `provider` | Secret provider, default `config` |
+| `scope` | List of scope prefixes |
+| `types` | Map of key → DuckDB type, for values that are not `VARCHAR` |
 | any other field | One secret value, as a string |
 
 Values are plain strings so other tools can use them directly (for example, Vault Agent templates or
 applications reading the same credentials). Non-string values are stored as their DuckDB text form and converted
-back using `duckdb_types`, e.g. `MAP {'X-Key': 'v'}` is stored as `{X-Key=v}` with type `MAP(VARCHAR, VARCHAR)`.
+back using `types`, e.g. `MAP {'X-Key': 'v'}` is stored as `{X-Key=v}` with type `MAP(VARCHAR, VARCHAR)`.
 
 ### Writing secrets with the Vault CLI
 
-Entries can be written by hand. Only `duckdb_type` is required. Lists may be written as comma-separated text
+Entries can be written by hand. Only `type` is required. Lists may be written as comma-separated text
 and maps as JSON text:
 
 ```sh
 vault kv put secret/duckdb/analytics_s3 \
-    duckdb_type=s3 \
-    duckdb_scope='s3://analytics,s3://analytics-archive' \
-    duckdb_types='{"use_ssl": "BOOLEAN"}' \
+    type=s3 \
+    scope='s3://analytics,s3://analytics-archive' \
+    types='{"use_ssl": "BOOLEAN"}' \
     key_id=AKIA... secret=... region=eu-west-1 use_ssl=true
 ```
 
-Without `duckdb_redact_keys`, every value is redacted except well-known non-sensitive keys (`region`,
-`endpoint`, `url_style`, `use_ssl`, `account_name`, …). Keys starting with `duckdb_` are reserved.
+`duckdb_secrets()` shows every value as `redacted` except well-known non-sensitive keys (`region`, `endpoint`,
+`url_style`, `use_ssl`, `account_name`, …). The four field names above are reserved: a secret with a value under
+one of those names cannot be stored in Vault.
 
 ### Behaviour
 
 - `CREATE` uses KV check-and-set, so it fails if the secret already exists. `IF NOT EXISTS` and `OR REPLACE` work
   as usual. A soft-deleted entry (`vault kv delete`) can be created again.
 - `DROP` deletes the entry's metadata, which removes all its versions.
+- Every entry under `<vault_kv_mount>/<vault_kv_prefix>/` that has a `type` field is read as a DuckDB secret, so keep
+  that path for DuckDB secrets only.
 - Changes made directly in Vault are picked up after `vault_cache_ttl_seconds`.
 - Writes go to Vault right away and are not rolled back with the DuckDB transaction, the same as local
   persistent secrets.
