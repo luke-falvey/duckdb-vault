@@ -1,0 +1,49 @@
+# name: test/sql/vault_client.test
+# description: Errors reported by the Vault client before or without reaching a Vault server
+# group: [sql]
+
+# Assumes the VAULT_ADDR / VAULT_TOKEN environment variables are not set.
+
+require vault
+
+require httpfs
+
+# A Vault address nobody listens on
+statement ok
+SET vault_addr = 'http://127.0.0.1:1';
+
+statement ok
+SET vault_token = 'some-token';
+
+statement error
+CREATE PERSISTENT SECRET s1 IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+Failed to connect to Vault at http://127.0.0.1:1
+
+# Missing credentials for login-based methods are reported before any request is made
+statement ok
+SET vault_auth_method = 'userpass';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*requires vault_username and vault_password.*
+
+statement ok
+SET vault_auth_method = 'jwt';
+
+statement ok
+SET vault_role = 'my-role';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*requires vault_jwt or vault_jwt_path.*
+
+statement ok
+SET vault_jwt_path = '/nonexistent/token';
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*Could not read Vault JWT from file '/nonexistent/token'.*

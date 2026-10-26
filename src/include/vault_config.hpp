@@ -33,9 +33,6 @@ struct VaultConfig {
 
 	int64_t cache_ttl_seconds = 60;
 
-	string ca_cert;
-	bool tls_skip_verify = false;
-
 	bool IsConfigured() const {
 		return !addr.empty();
 	}

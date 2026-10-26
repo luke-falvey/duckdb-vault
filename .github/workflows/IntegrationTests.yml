@@ -24,7 +24,7 @@ jobs:
           submodules: 'true'
 
       - name: Install build dependencies
-        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build ccache libssl-dev
+        run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build ccache libssl-dev libcurl4-openssl-dev
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -44,4 +44,4 @@ jobs:
 
       - name: Vault logs
         if: failure()
-        run: docker compose logs vault lldap k3s
+        run: docker compose logs vault vault-tls lldap k3s
