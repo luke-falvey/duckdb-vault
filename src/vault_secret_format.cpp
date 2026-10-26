@@ -2,9 +2,64 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/type_visitor.hpp"
 
 namespace duckdb {
+
+//! Store a secret value as the matching JSON type
+static void AddJSONValue(JSONBuilder &builder, JSONBuilder::mut_t target, const string &key, const Value &value,
+                         const string &secret_name) {
+	if (value.IsNull()) {
+		builder.AddNull(target, key);
+		return;
+	}
+	auto &type = value.type();
+	switch (type.id()) {
+	case LogicalTypeId::VARCHAR:
+		builder.AddString(target, key, StringValue::Get(value));
+		return;
+	case LogicalTypeId::BOOLEAN:
+		builder.AddBool(target, key, BooleanValue::Get(value));
+		return;
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+		builder.AddInt(target, key, value.GetValue<int64_t>());
+		return;
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+		builder.AddUInt(target, key, value.GetValue<uint64_t>());
+		return;
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
+		builder.AddDouble(target, key, value.GetValue<double>());
+		return;
+	case LogicalTypeId::MAP:
+		if (MapType::KeyType(type).id() == LogicalTypeId::VARCHAR &&
+		    MapType::ValueType(type).id() == LogicalTypeId::VARCHAR) {
+			auto map = builder.NewObject();
+			for (auto &entry : MapValue::GetChildren(value)) {
+				auto &key_value = StructValue::GetChildren(entry);
+				auto map_key = StringValue::Get(key_value[0]);
+				if (key_value[1].IsNull()) {
+					builder.AddNull(map, map_key);
+				} else {
+					builder.AddString(map, map_key, StringValue::Get(key_value[1]));
+				}
+			}
+			builder.AddValue(target, key, map);
+			return;
+		}
+		break;
+	default:
+		break;
+	}
+	throw NotImplementedException("Secret '%s' cannot be stored in Vault: value '%s' has type %s, which has no JSON "
+	                              "equivalent",
+	                              secret_name, key, type.ToString());
+}
 
 void VaultSecretFormat::Serialize(const BaseSecret &secret, JSONBuilder &builder, JSONBuilder::mut_t target) {
 	auto kv_secret = dynamic_cast<const KeyValueSecret *>(&secret);
@@ -23,23 +78,13 @@ void VaultSecretFormat::Serialize(const BaseSecret &secret, JSONBuilder &builder
 	}
 	builder.AddValue(target, SCOPE_FIELD, scope);
 
-	auto types = builder.NewObject();
 	for (auto &entry : kv_secret->secret_map) {
 		auto key = StringUtil::Lower(entry.first.GetIdentifierName());
 		if (IsReservedField(key)) {
 			throw InvalidInputException("Secret key '%s' cannot be stored in Vault: the field name is reserved", key);
 		}
-		auto &value = entry.second;
-		if (value.type().id() != LogicalTypeId::VARCHAR) {
-			builder.AddString(types, key, value.type().ToString());
-		}
-		if (value.IsNull()) {
-			builder.AddNull(target, key);
-		} else {
-			builder.AddString(target, key, value.ToString());
-		}
+		AddJSONValue(builder, target, key, entry.second, secret.GetName().GetIdentifierName());
 	}
-	builder.AddValue(target, TYPES_FIELD, types);
 }
 
 //! Parse a reserved list field: JSON array, JSON array text, or comma-separated text
@@ -70,81 +115,52 @@ static vector<string> ParseList(JSONReader::val_t val) {
 	return JSONReader::GetStringArray(val);
 }
 
-//! Parse the types field: JSON object or JSON object text
-static case_insensitive_map_t<string> ParseTypes(JSONReader::val_t val) {
-	case_insensitive_map_t<string> result;
-	if (!val) {
-		return result;
+//! Convert one stored field into a DuckDB value, by JSON type
+static Value ToValue(JSONReader::val_t val) {
+	using namespace duckdb_yyjson; // NOLINT
+	if (yyjson_is_null(val)) {
+		return Value();
 	}
-	auto collect = [&](JSONReader::val_t obj) {
-		using namespace duckdb_yyjson; // NOLINT: the foreach macro uses unqualified names
-		if (!obj || !yyjson_is_obj(obj)) {
-			throw InvalidInputException("Vault field '%s' must be a JSON object", VaultSecretFormat::TYPES_FIELD);
-		}
+	if (yyjson_is_str(val)) {
+		return Value(JSONReader::AsString(val));
+	}
+	if (yyjson_is_bool(val)) {
+		return Value::BOOLEAN(yyjson_get_bool(val));
+	}
+	if (yyjson_is_sint(val)) {
+		return Value::BIGINT(yyjson_get_sint(val));
+	}
+	if (yyjson_is_uint(val)) {
+		auto number = yyjson_get_uint(val);
+		return number <= static_cast<uint64_t>(NumericLimits<int64_t>::Maximum())
+		           ? Value::BIGINT(static_cast<int64_t>(number))
+		           : Value::UBIGINT(number);
+	}
+	if (yyjson_is_real(val)) {
+		return Value::DOUBLE(yyjson_get_real(val));
+	}
+	if (yyjson_is_obj(val)) {
+		vector<Value> keys;
+		vector<Value> values;
 		size_t idx, max;
-		yyjson_val *key, *type;
-		yyjson_obj_foreach(obj, idx, max, key, type) {
-			if (JSONReader::IsString(type)) {
-				result[JSONReader::AsString(key)] = JSONReader::AsString(type);
+		yyjson_val *key, *entry;
+		yyjson_obj_foreach(val, idx, max, key, entry) {
+			keys.emplace_back(JSONReader::AsString(key));
+			if (yyjson_is_null(entry)) {
+				values.emplace_back(LogicalType::VARCHAR);
+			} else if (yyjson_is_str(entry)) {
+				values.emplace_back(JSONReader::AsString(entry));
+			} else {
+				throw InvalidInputException("map values must be strings");
 			}
 		}
-	};
-	if (JSONReader::IsString(val)) {
-		auto text = JSONReader::AsString(val);
-		StringUtil::Trim(text);
-		if (!text.empty()) {
-			auto doc = JSONReader::Parse(text);
-			collect(doc.Root());
-		}
-	} else {
-		collect(val);
+		return Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values));
 	}
-	return result;
-}
-
-//! Secrets only hold built-in types, so no catalog (and no client context lock) is needed to parse them
-static LogicalType ParseType(const string &type) {
-	auto result = UnboundType::TryParseAndDefaultBind(type);
-	if (TypeVisitor::Contains(result, LogicalTypeId::UNBOUND)) {
-		throw InvalidInputException("Type \"%s\" is not a built-in type", type);
-	}
-	return result;
-}
-
-//! Convert one stored field into a DuckDB value
-static Value ToValue(JSONReader::val_t val, const string *declared_type) {
-	using namespace duckdb_yyjson; // NOLINT
-	Value result;
-	if (yyjson_is_null(val)) {
-		result = Value();
-	} else if (yyjson_is_str(val)) {
-		result = Value(JSONReader::AsString(val));
-	} else if (yyjson_is_bool(val)) {
-		result = Value::BOOLEAN(yyjson_get_bool(val));
-	} else if (yyjson_is_int(val)) {
-		result = yyjson_is_uint(val) ? Value::UBIGINT(yyjson_get_uint(val)) : Value::BIGINT(yyjson_get_sint(val));
-	} else if (yyjson_is_real(val)) {
-		result = Value::DOUBLE(yyjson_get_real(val));
-	} else {
-		// arrays/objects written by hand: keep the JSON text
-		result = Value(JSONReader::Write(val));
-	}
-	if (!declared_type) {
-		return result;
-	}
-	auto type = ParseType(*declared_type);
-	if (result.IsNull()) {
-		return Value(type);
-	}
-	if (result.type() == type) {
-		return result;
-	}
-	// Go through VARCHAR so that every stored representation (string, number, bool) casts the same way
-	return Value(result.ToString()).DefaultCastAs(type, true);
+	throw InvalidInputException("JSON arrays are not supported as secret values");
 }
 
 bool VaultSecretFormat::IsReservedField(const string &key) {
-	return key == TYPE_FIELD || key == PROVIDER_FIELD || key == SCOPE_FIELD || key == TYPES_FIELD;
+	return key == TYPE_FIELD || key == PROVIDER_FIELD || key == SCOPE_FIELD;
 }
 
 void VaultSecretFormat::SetRedactKeys(KeyValueSecret &secret) {
@@ -193,7 +209,6 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 		provider = "config";
 	}
 	auto scope = ParseList(JSONReader::Get(data, SCOPE_FIELD));
-	auto types = ParseTypes(JSONReader::Get(data, TYPES_FIELD));
 
 	auto result = make_uniq<KeyValueSecret>(scope, Identifier(StringUtil::Lower(type)),
 	                                        Identifier(StringUtil::Lower(provider)), Identifier(name));
@@ -205,10 +220,8 @@ unique_ptr<BaseSecret> VaultSecretFormat::Deserialize(const string &name, JSONRe
 		if (IsReservedField(key)) {
 			continue;
 		}
-		auto type_entry = types.find(key);
 		try {
-			result->secret_map[Identifier(key)] =
-			    ToValue(field, type_entry == types.end() ? nullptr : &type_entry->second);
+			result->secret_map[Identifier(key)] = ToValue(field);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw InvalidInputException("Vault secret '%s': could not read field '%s': %s", name, key,

@@ -21,10 +21,9 @@ expected = {
     "type": "http",
     "provider": "config",
     "scope": ["https://format.example.com"],
-    "types": {"verify_ssl": "BOOLEAN", "extra_http_headers": "MAP(VARCHAR, VARCHAR)"},
     "bearer_token": "format-token",
-    "verify_ssl": "true",
-    "extra_http_headers": "{X-A=b}",
+    "verify_ssl": True,
+    "extra_http_headers": {"X-A": "b"},
 }
 errors = []
 for key, value in expected.items():

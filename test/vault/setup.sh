@@ -67,12 +67,22 @@ vault write auth/jwt/role/duckdb role_type=jwt bound_audiences=duckdb-vault user
 	token_policies=duckdb-rw
 
 # --- Seed data: entries written by hand, the way an operator would ---------
+# Written with key=value pairs: every value is a string
 vault kv put secret/it_handwritten/manual_http \
 	type=http \
 	scope='https://api.example.com,https://other.example.com' \
-	types='{"verify_ssl":"BOOLEAN"}' \
 	bearer_token=hand-written-token \
 	verify_ssl=false
+# Written as JSON: native boolean and a map of headers
+vault kv put secret/it_handwritten/manual_json - <<'JSON'
+{
+  "type": "http",
+  "scope": ["https://json.example.com"],
+  "bearer_token": "json-token",
+  "verify_ssl": false,
+  "extra_http_headers": {"X-From-Vault": "yes"}
+}
+JSON
 # Not a DuckDB secret (no type): must be ignored
 vault kv put secret/it_handwritten/not_a_duckdb_secret foo=bar
 # Soft-deleted entry: must not show up

@@ -12,18 +12,17 @@ namespace duckdb {
 //!   type             secret type (required)
 //!   provider         secret provider (default "config")
 //!   scope            array of scope prefixes
-//!   types            object key -> DuckDB type, for values that are not VARCHAR
-//!   <any other field> one secret value, stored as a string
+//!   <any other field> one secret value as the matching JSON type: string, boolean, number, or an object of strings
+//!                    for MAP(VARCHAR, VARCHAR)
 //!
 //! When displayed, every value is redacted except well-known non-sensitive keys.
 //!
-//! The reserved fields also accept the string forms a person would type with `vault kv put`
-//! (comma-separated lists or JSON text).
+//! scope also accepts the string forms a person would type with `vault kv put`: comma-separated text or JSON array
+//! text.
 struct VaultSecretFormat {
 	static constexpr const char *TYPE_FIELD = "type";
 	static constexpr const char *PROVIDER_FIELD = "provider";
 	static constexpr const char *SCOPE_FIELD = "scope";
-	static constexpr const char *TYPES_FIELD = "types";
 
 	//! Write the secret's fields into the JSON object `target`. Throws for secrets that are not key/value secrets.
 	static void Serialize(const BaseSecret &secret, JSONBuilder &builder, JSONBuilder::mut_t target);

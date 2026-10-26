@@ -83,18 +83,6 @@ public:
 		return result;
 	}
 
-	//! Serialize any value back to JSON text
-	static string Write(val_t val) {
-		size_t len;
-		auto data = duckdb_yyjson::yyjson_val_write(val, 0, &len);
-		if (!data) {
-			return string();
-		}
-		string result(data, len);
-		free(data);
-		return result;
-	}
-
 private:
 	duckdb_yyjson::yyjson_doc *doc = nullptr;
 };
@@ -129,6 +117,15 @@ public:
 	}
 	void AddInt(mut_t obj, const string &key, int64_t value) {
 		duckdb_yyjson::yyjson_mut_obj_add(obj, Key(key), duckdb_yyjson::yyjson_mut_sint(doc, value));
+	}
+	void AddUInt(mut_t obj, const string &key, uint64_t value) {
+		duckdb_yyjson::yyjson_mut_obj_add(obj, Key(key), duckdb_yyjson::yyjson_mut_uint(doc, value));
+	}
+	void AddDouble(mut_t obj, const string &key, double value) {
+		duckdb_yyjson::yyjson_mut_obj_add(obj, Key(key), duckdb_yyjson::yyjson_mut_real(doc, value));
+	}
+	void AddBool(mut_t obj, const string &key, bool value) {
+		duckdb_yyjson::yyjson_mut_obj_add(obj, Key(key), duckdb_yyjson::yyjson_mut_bool(doc, value));
 	}
 	void AddNull(mut_t obj, const string &key) {
 		duckdb_yyjson::yyjson_mut_obj_add(obj, Key(key), duckdb_yyjson::yyjson_mut_null(doc));

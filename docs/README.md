@@ -111,18 +111,16 @@ Each DuckDB secret is one KV v2 entry at `<vault_kv_mount>/<vault_kv_prefix>/<se
 lower-case). With the defaults, `CREATE PERSISTENT SECRET my_s3 IN vault (...)` writes `secret/duckdb/my_s3`:
 
 ```
-$ vault kv get secret/duckdb/my_s3
-======= Data =======
-Key               Value
----               -----
-provider          config
-scope             [s3://my-bucket]
-type              s3
-types             map[use_ssl:BOOLEAN]
-key_id            AKIA...
-region            eu-west-1
-secret            wJalr...
-use_ssl           true
+$ vault kv get -format=json secret/duckdb/my_s3 | jq .data.data
+{
+  "type": "s3",
+  "provider": "config",
+  "scope": ["s3://my-bucket"],
+  "key_id": "AKIA...",
+  "secret": "wJalr...",
+  "region": "eu-west-1",
+  "use_ssl": true
+}
 ```
 
 | Field | Content |
@@ -130,29 +128,42 @@ use_ssl           true
 | `type` | Secret type (`s3`, `gcs`, `http`, …). **Required**: entries without it are ignored |
 | `provider` | Secret provider, default `config` |
 | `scope` | List of scope prefixes |
-| `types` | Map of key → DuckDB type, for values that are not `VARCHAR` |
-| any other field | One secret value, as a string |
+| any other field | One secret value, stored as the matching JSON type (below) |
 
-Values are plain strings so other tools can use them directly (for example, Vault Agent templates or
-applications reading the same credentials). Non-string values are stored as their DuckDB text form and converted
-back using `types`, e.g. `MAP {'X-Key': 'v'}` is stored as `{X-Key=v}` with type `MAP(VARCHAR, VARCHAR)`.
+| DuckDB value | JSON | Read back as |
+|---|---|---|
+| `VARCHAR` | string | `VARCHAR` |
+| `BOOLEAN` | `true` / `false` | `BOOLEAN` |
+| integer types | number | `BIGINT` |
+| `FLOAT`, `DOUBLE` | number | `DOUBLE` |
+| `MAP(VARCHAR, VARCHAR)`, e.g. `extra_http_headers` | object of strings | `MAP(VARCHAR, VARCHAR)` |
+| `NULL` | `null` | `NULL` |
+
+These cover every parameter of DuckDB's built-in secret types. A secret with a value of any other type (for example
+a `STRUCT` or a `DATE`) cannot be stored in Vault. `type`, `provider` and `scope` are reserved: a secret with a value
+under one of those names cannot be stored either.
 
 ### Writing secrets with the Vault CLI
 
-Entries can be written by hand. Only `type` is required. Lists may be written as comma-separated text
-and maps as JSON text:
+Entries can be written by hand. Only `type` is required. `vault kv put key=value` stores every value as a string,
+which works for text and for booleans (`use_ssl=true`); `scope` may be comma-separated:
 
 ```sh
 vault kv put secret/duckdb/analytics_s3 \
-    type=s3 \
-    scope='s3://analytics,s3://analytics-archive' \
-    types='{"use_ssl": "BOOLEAN"}' \
+    type=s3 scope='s3://analytics,s3://analytics-archive' \
     key_id=AKIA... secret=... region=eu-west-1 use_ssl=true
 ```
 
+Maps such as `extra_http_headers` must be JSON objects, so write those entries as JSON:
+
+```sh
+vault kv put secret/duckdb/api - <<'EOF'
+{"type": "http", "bearer_token": "...", "extra_http_headers": {"X-Api-Key": "..."}}
+EOF
+```
+
 `duckdb_secrets()` shows every value as `redacted` except well-known non-sensitive keys (`region`, `endpoint`,
-`url_style`, `use_ssl`, `account_name`, …). The four field names above are reserved: a secret with a value under
-one of those names cannot be stored in Vault.
+`url_style`, `use_ssl`, `account_name`, …).
 
 ### Behaviour
 
