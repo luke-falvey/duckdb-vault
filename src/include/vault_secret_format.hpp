@@ -8,35 +8,40 @@ namespace duckdb {
 
 //! Conversion between DuckDB secrets and the fields of a Vault KV v2 entry.
 //!
+//! Only entries whose KV custom metadata contains duckdb=true are DuckDB secrets: other applications can keep
+//! their own entries under the same path.
 //! Layout of the KV "data" object:
-//!   duckdb_type            secret type (required)
-//!   duckdb_provider        secret provider (default "config")
-//!   duckdb_scope           array of scope prefixes
-//!   duckdb_types           object key -> DuckDB type, for values that are not VARCHAR
-//!   duckdb_redact_keys     array of keys to redact when displaying the secret
-//!   duckdb_format_version  "1"
-//!   <any other field>      one secret value, stored as a string
+//!   type             secret type (required)
+//!   provider         secret provider (default "config")
+//!   scope            array of scope prefixes
+//!   <any other field> one secret value as the matching JSON type: string, boolean, number, or an object of strings
+//!                    for MAP(VARCHAR, VARCHAR)
 //!
-//! The reserved fields also accept the string forms a person would type with `vault kv put`
-//! (comma-separated lists or JSON text).
+//! When displayed, every value is redacted except well-known non-sensitive keys.
+//!
+//! scope also accepts the string forms a person would type with `vault kv put`: comma-separated text or JSON array
+//! text.
 struct VaultSecretFormat {
-	static constexpr const char *TYPE_FIELD = "duckdb_type";
-	static constexpr const char *PROVIDER_FIELD = "duckdb_provider";
-	static constexpr const char *SCOPE_FIELD = "duckdb_scope";
-	static constexpr const char *TYPES_FIELD = "duckdb_types";
-	static constexpr const char *REDACT_FIELD = "duckdb_redact_keys";
-	static constexpr const char *VERSION_FIELD = "duckdb_format_version";
-	static constexpr const char *FORMAT_VERSION = "1";
-	static constexpr const char *RESERVED_PREFIX = "duckdb_";
+	static constexpr const char *TYPE_FIELD = "type";
+	static constexpr const char *PROVIDER_FIELD = "provider";
+	static constexpr const char *SCOPE_FIELD = "scope";
+	//! KV custom metadata marking an entry as a DuckDB secret
+	static constexpr const char *MARKER_KEY = "duckdb";
+	static constexpr const char *MARKER_VALUE = "true";
 
 	//! Write the secret's fields into the JSON object `target`. Throws for secrets that are not key/value secrets.
 	static void Serialize(const BaseSecret &secret, JSONBuilder &builder, JSONBuilder::mut_t target);
 
-	//! Build a secret from a KV "data" object. Returns nullptr when the entry is not a DuckDB secret (no duckdb_type).
+	//! Build a secret from a KV "data" object. Returns nullptr when the entry is not a DuckDB secret (no type).
 	static unique_ptr<BaseSecret> Deserialize(const string &name, JSONReader::val_t data);
 
-	//! Keys displayed in clear text when an entry does not list its redacted keys
+	//! Keys displayed in clear text by duckdb_secrets()
 	static bool IsNonSensitiveKey(const string &key);
+	//! Redact every value of the secret except the non-sensitive ones
+	static void SetRedactKeys(KeyValueSecret &secret);
+
+	//! Whether a field holds the secret's metadata rather than one of its values
+	static bool IsReservedField(const string &key);
 };
 
 } // namespace duckdb

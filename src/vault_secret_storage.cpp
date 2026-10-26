@@ -101,24 +101,42 @@ unique_ptr<SecretEntry> VaultSecretStorage::FetchSecret(VaultClient &vault, cons
 		VaultClient::ThrowError("read secret '" + name + "'", path, response);
 	}
 	auto doc = JSONReader::Parse(response.body);
-	auto data = JSONReader::Get(JSONReader::Get(doc.Root(), "data"), "data");
-	auto secret = VaultSecretFormat::Deserialize(name, data);
+	auto response_data = JSONReader::Get(doc.Root(), "data");
+	auto custom_metadata = JSONReader::Get(JSONReader::Get(response_data, "metadata"), "custom_metadata");
+	if (JSONReader::GetString(custom_metadata, VaultSecretFormat::MARKER_KEY) != VaultSecretFormat::MARKER_VALUE) {
+		return nullptr; // not a DuckDB secret
+	}
+	auto secret = VaultSecretFormat::Deserialize(name, JSONReader::Get(response_data, "data"));
 	if (!secret) {
 		return nullptr;
 	}
 	return MakeEntry(*secret);
 }
 
-bool VaultSecretStorage::SecretExists(VaultClient &vault, const string &name) {
-	auto path = DataPath(vault.Config(), name);
+VaultSecretStorage::EntryState VaultSecretStorage::ReadEntryState(VaultClient &vault, const string &name) {
+	EntryState state;
+	auto path = MetadataPath(vault.Config(), name);
 	auto response = vault.Request("GET", path);
 	if (response.status == 404) {
-		return false;
+		return state;
 	}
 	if (!response.Ok()) {
-		VaultClient::ThrowError("read secret '" + name + "'", path, response);
+		VaultClient::ThrowError("read metadata of secret '" + name + "'", path, response);
 	}
-	return true;
+	auto doc = JSONReader::Parse(response.body);
+	auto data = JSONReader::Get(doc.Root(), "data");
+	state.has_metadata = true;
+	state.current_version = JSONReader::GetInt(data, "current_version", 0);
+	auto latest = JSONReader::Get(JSONReader::Get(data, "versions"), std::to_string(state.current_version).c_str());
+	state.exists = latest && JSONReader::GetString(latest, "deletion_time").empty() &&
+	               !duckdb_yyjson::yyjson_is_true(JSONReader::Get(latest, "destroyed"));
+	state.custom_metadata = JSONReader::GetStringMembers(JSONReader::Get(data, "custom_metadata"));
+	for (auto &entry : state.custom_metadata) {
+		if (entry.first == VaultSecretFormat::MARKER_KEY && entry.second == VaultSecretFormat::MARKER_VALUE) {
+			state.is_duckdb = true;
+		}
+	}
+	return state;
 }
 
 void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
@@ -159,46 +177,47 @@ void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
 	cache_loaded_at = now;
 }
 
-bool VaultSecretStorage::WriteSecret(VaultClient &vault, const BaseSecret &secret, const string &name,
-                                     bool create_only) {
+bool VaultSecretStorage::WriteSecret(VaultClient &vault, const BaseSecret &secret, const string &name, bool replace) {
 	auto path = DataPath(vault.Config(), name);
-	auto build_body = [&](int64_t cas) {
-		JSONBuilder body;
-		if (cas >= 0) {
-			auto options = body.NewObject();
-			body.AddInt(options, "cas", cas);
-			body.AddValue(body.Root(), "options", options);
-		}
-		auto data = body.NewObject();
-		VaultSecretFormat::Serialize(secret, body, data);
-		body.AddValue(body.Root(), "data", data);
-		return body.ToString();
-	};
-
-	auto response = vault.Request("POST", path, build_body(create_only ? 0 : -1));
-	if (response.Ok()) {
-		return true;
+	auto state = ReadEntryState(vault, name);
+	if (state.has_metadata && !state.is_duckdb) {
+		throw InvalidInputException("Cannot store secret '%s' in Vault: a Vault entry that is not a DuckDB secret "
+		                            "already exists at '%s'",
+		                            name, path);
 	}
-	auto message = VaultClient::ErrorMessage(response);
-	bool cas_mismatch = response.status == 400 && StringUtil::Contains(message, "check-and-set");
-	if (!cas_mismatch) {
-		VaultClient::ThrowError("write secret '" + name + "'", path, response);
-	}
-	// The key exists. If its latest version was deleted (e.g. `vault kv delete`), the secret is gone as far as
-	// DuckDB is concerned, so create a new version on top of it.
-	if (SecretExists(vault, name)) {
+	if (state.exists && !replace) {
 		return false;
 	}
-	auto metadata_path = MetadataPath(vault.Config(), name);
-	auto metadata = vault.Request("GET", metadata_path);
-	if (!metadata.Ok()) {
-		VaultClient::ThrowError("read metadata of secret '" + name + "'", metadata_path, metadata);
-	}
-	auto doc = JSONReader::Parse(metadata.body);
-	auto current_version = JSONReader::GetInt(JSONReader::Get(doc.Root(), "data"), "current_version", 0);
-	response = vault.Request("POST", path, build_body(current_version));
+
+	// Check-and-set against the version just read, so a concurrent change fails instead of being overwritten
+	JSONBuilder body;
+	auto options = body.NewObject();
+	body.AddInt(options, "cas", state.current_version);
+	body.AddValue(body.Root(), "options", options);
+	auto data = body.NewObject();
+	VaultSecretFormat::Serialize(secret, body, data);
+	body.AddValue(body.Root(), "data", data);
+	auto response = vault.Request("POST", path, body.ToString());
 	if (!response.Ok()) {
 		VaultClient::ThrowError("write secret '" + name + "'", path, response);
+	}
+
+	// Mark the entry only after the data write succeeded, so an entry that is not ours is never marked
+	JSONBuilder metadata_body;
+	auto custom_metadata = metadata_body.NewObject();
+	for (auto &entry : state.custom_metadata) {
+		if (entry.first != VaultSecretFormat::MARKER_KEY) {
+			metadata_body.AddString(custom_metadata, entry.first, entry.second);
+		}
+	}
+	metadata_body.AddString(custom_metadata, VaultSecretFormat::MARKER_KEY, VaultSecretFormat::MARKER_VALUE);
+	metadata_body.AddValue(metadata_body.Root(), "custom_metadata", custom_metadata);
+	auto metadata_path = MetadataPath(vault.Config(), name);
+	auto metadata_response = vault.Request("POST", metadata_path, metadata_body.ToString());
+	if (!metadata_response.Ok()) {
+		VaultClient::ThrowError("mark secret '" + name +
+		                            "' as a DuckDB secret (its data was written; retry with CREATE OR REPLACE)",
+		                        metadata_path, metadata_response);
 	}
 	return true;
 }
@@ -213,8 +232,7 @@ unique_ptr<SecretEntry> VaultSecretStorage::StoreSecret(unique_ptr<const BaseSec
 	if (on_conflict == OnCreateConflict::ALTER_ON_CONFLICT) {
 		throw InternalException("unknown OnCreateConflict found while registering secret");
 	}
-	bool create_only = on_conflict != OnCreateConflict::REPLACE_ON_CONFLICT;
-	if (!WriteSecret(*vault, *secret, name, create_only)) {
+	if (!WriteSecret(*vault, *secret, name, on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT)) {
 		if (on_conflict == OnCreateConflict::IGNORE_ON_CONFLICT) {
 			return nullptr;
 		}
@@ -229,7 +247,8 @@ unique_ptr<SecretEntry> VaultSecretStorage::StoreSecret(unique_ptr<const BaseSec
 	if (kv_secret) {
 		KeyValueSecret renamed(kv_secret->GetScope(), kv_secret->GetType(), kv_secret->GetProvider(), Identifier(name));
 		renamed.secret_map = kv_secret->secret_map;
-		renamed.redact_keys = kv_secret->redact_keys;
+		// Redact the same way as when the secret is read back from Vault
+		VaultSecretFormat::SetRedactKeys(renamed);
 		entry = MakeEntry(renamed);
 	} else {
 		entry = MakeEntry(*stored);
@@ -264,7 +283,8 @@ void VaultSecretStorage::DropSecretByName(const Identifier &name_p, OnEntryNotFo
 	auto vault = Connect(GetContext(transaction), true);
 	auto name = NormalizeName(name_p.GetIdentifierName());
 
-	if (!SecretExists(*vault, name)) {
+	auto state = ReadEntryState(*vault, name);
+	if (!state.exists || !state.is_duckdb) {
 		cache.erase(name);
 		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
 			throw InvalidInputException("Failed to remove non-existent persistent secret '%s' in secret storage '%s'",

@@ -20,32 +20,48 @@ statement ok
 SET vault_cache_ttl_seconds = 0;
 
 # test/vault/setup.sh seeds secret/it_handwritten/ with:
-#   manual_http          a DuckDB secret written with `vault kv put` (string values only)
-#   not_a_duckdb_secret  an unrelated entry without duckdb_type
-#   deleted_http         a soft-deleted entry
+#   manual_http          a DuckDB secret written with `vault kv put key=value` (string values only)
+#   manual_json          a DuckDB secret written as JSON (boolean and map values)
+#   deleted_http         a soft-deleted DuckDB secret
+# and with entries of other applications, which have no duckdb=true custom metadata:
+#   not_a_duckdb_secret  an unrelated entry
+#   foreign_s3           shaped exactly like a DuckDB s3 secret
+#   foreign_deleted      soft-deleted
 statement ok
 SET vault_kv_prefix = 'it_handwritten';
 
 query IIIII
-SELECT name, type, provider, persistent, storage FROM duckdb_secrets();
+SELECT name, type, provider, persistent, storage FROM duckdb_secrets() ORDER BY name;
 ----
 manual_http	http	config	true	vault
+manual_json	http	config	true	vault
 
 query I
-SELECT scope FROM duckdb_secrets();
+SELECT scope FROM duckdb_secrets() WHERE name = 'manual_http';
 ----
 ['https://api.example.com', 'https://other.example.com']
 
-# No duckdb_redact_keys field: everything except known non-sensitive keys is redacted
+# Everything except known non-sensitive keys is redacted
 query I
-SELECT secret_string FROM duckdb_secrets();
+SELECT secret_string FROM duckdb_secrets() WHERE name = 'manual_http';
 ----
 name=manual_http;type=http;provider=config;serializable=true;scope=https://api.example.com,https://other.example.com;bearer_token=redacted;verify_ssl=false
 
 query I
-SELECT secret_string FROM duckdb_secrets(redact=false);
+SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'manual_http';
 ----
 name=manual_http;type=http;provider=config;serializable=true;scope=https://api.example.com,https://other.example.com;bearer_token=hand-written-token;verify_ssl=false
+
+# JSON values keep their types: the headers object is read back as a MAP
+query I
+SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'manual_json';
+----
+name=manual_json;type=http;provider=config;serializable=true;scope=https://json.example.com;bearer_token=json-token;extra_http_headers={X-From-Vault=yes};verify_ssl=false
+
+query I
+SELECT secret_string FROM duckdb_secrets() WHERE name = 'manual_json';
+----
+name=manual_json;type=http;provider=config;serializable=true;scope=https://json.example.com;bearer_token=redacted;extra_http_headers=redacted;verify_ssl=false
 
 query II
 SELECT name, storage FROM which_secret('https://other.example.com/x.parquet', 'http');
@@ -67,9 +83,54 @@ SELECT name FROM duckdb_secrets() ORDER BY name;
 ----
 deleted_http
 manual_http
+manual_json
 
 statement ok
 DROP PERSISTENT SECRET deleted_http FROM vault;
+
+# --- entries of other applications --------------------------------------------
+# Never returned by lookups, even when they look like DuckDB secrets
+query I
+SELECT count(*) FROM which_secret('s3://bucket/file.parquet', 's3');
+----
+0
+
+# Never overwritten
+statement error
+CREATE PERSISTENT SECRET foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
+----
+a Vault entry that is not a DuckDB secret already exists at 'secret/data/it_handwritten/foreign_s3'
+
+statement error
+CREATE OR REPLACE PERSISTENT SECRET foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
+----
+a Vault entry that is not a DuckDB secret already exists
+
+statement error
+CREATE PERSISTENT SECRET IF NOT EXISTS foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
+----
+a Vault entry that is not a DuckDB secret already exists
+
+# Not even when only a deleted version is left
+statement error
+CREATE PERSISTENT SECRET foreign_deleted IN vault (TYPE http, BEARER_TOKEN 'mine');
+----
+a Vault entry that is not a DuckDB secret already exists
+
+# Never deleted: as far as DuckDB is concerned they do not exist
+statement error
+DROP PERSISTENT SECRET foreign_s3 FROM vault;
+----
+Failed to remove non-existent persistent secret 'foreign_s3'
+
+statement ok
+DROP PERSISTENT SECRET IF EXISTS not_a_duckdb_secret FROM vault;
+
+query I
+SELECT name FROM duckdb_secrets() ORDER BY name;
+----
+manual_http
+manual_json
 
 # --- other KV mount and prefixes --------------------------------------------
 statement ok

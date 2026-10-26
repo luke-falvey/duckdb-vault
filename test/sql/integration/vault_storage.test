@@ -155,7 +155,7 @@ typed_http
 query I
 SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'typed_http';
 ----
-name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers={X-Api-Key='k=1;2', Accept=application/json};http_proxy=proxy.internal:3128;verify_ssl=false
+name=typed_http;type=http;provider=config;serializable=true;scope=https://typed.example.com;extra_http_headers={Accept=application/json, X-Api-Key='k=1;2'};http_proxy=proxy.internal:3128;verify_ssl=false
 
 # extra_http_headers is redacted; http_proxy and verify_ssl are not
 query I
