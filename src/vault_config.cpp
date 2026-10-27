@@ -3,29 +3,18 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/secret/secret_manager.hpp"
 
 #include <cstdlib>
-#include <fstream>
-#include <sstream>
 
 namespace duckdb {
 
 static string GetEnv(const char *name) {
 	auto value = std::getenv(name);
 	return value ? string(value) : string();
-}
-
-static string ReadFileTrimmed(const string &path) {
-	std::ifstream in(path);
-	if (!in.good()) {
-		return string();
-	}
-	std::stringstream buffer;
-	buffer << in.rdbuf();
-	auto result = buffer.str();
-	StringUtil::Trim(result);
-	return result;
 }
 
 static string GetStringSetting(ClientContext &context, const char *name) {
@@ -139,6 +128,14 @@ void VaultConfig::RegisterSettings(DBConfig &config) {
 	    LogicalType::BIGINT, Value::BIGINT(60), ValidateCacheTTL);
 }
 
+static string TrimAddress(string value) {
+	StringUtil::Trim(value);
+	while (!value.empty() && value.back() == '/') {
+		value.pop_back();
+	}
+	return value;
+}
+
 static string TrimSlashes(string value) {
 	StringUtil::Trim(value);
 	while (!value.empty() && value.back() == '/') {
@@ -150,44 +147,91 @@ static string TrimSlashes(string value) {
 	return value;
 }
 
+string VaultConfig::ReadCredentialFile(FileSystem &fs, const string &path) {
+	// Through DuckDB's file system, so enable_external_access and allowed_directories apply
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	auto size = handle->GetFileSize();
+	if (size > MAX_CREDENTIAL_FILE_SIZE) {
+		throw InvalidConfigurationException("Credential file '%s' is too large (%llu bytes)", path, size);
+	}
+	string result(size, '\0');
+	handle->Read(&result[0], size);
+	StringUtil::Trim(result);
+	return result;
+}
+
+//! Fill the credentials from a secret of type vault matching the address. Returns false if there is none.
+static bool CredentialsFromSecret(ClientContext &context, VaultConfig &config) {
+	auto &manager = SecretManager::Get(context);
+	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
+	auto match = manager.LookupSecret(transaction, config.addr, VaultConfig::SECRET_TYPE);
+	if (!match.HasMatch()) {
+		return false;
+	}
+	auto &secret = match.GetSecret().Cast<KeyValueSecret>();
+	auto get = [&](const char *key) {
+		Value value;
+		return secret.TryGetValue(key, value) && !value.IsNull() ? value.ToString() : string();
+	};
+	config.token = get("token");
+	config.username = get("username");
+	config.password = get("password");
+	config.jwt = get("jwt");
+	auto role = get("role");
+	if (!role.empty()) {
+		config.role = role;
+	}
+	return true;
+}
+
 VaultConfig VaultConfig::FromContext(ClientContext &context) {
 	VaultConfig result;
-	result.addr = SettingOrEnv(context, "vault_addr", "VAULT_ADDR");
-	StringUtil::Trim(result.addr);
-	while (!result.addr.empty() && result.addr.back() == '/') {
-		result.addr.pop_back();
-	}
+	auto addr_setting = GetStringSetting(context, "vault_addr");
+	auto env_addr = GetEnv("VAULT_ADDR");
+	result.addr = TrimAddress(addr_setting.empty() ? env_addr : addr_setting);
+	// Credentials from the environment or files belong to the environment's Vault: only send them there
+	bool env_credentials = !result.addr.empty() && result.addr == TrimAddress(env_addr);
+
 	result.vault_namespace = TrimSlashes(SettingOrEnv(context, "vault_namespace", "VAULT_NAMESPACE"));
 	result.auth_method = AuthMethodFromString(GetStringSetting(context, "vault_auth_method"));
 	result.auth_mount = TrimSlashes(GetStringSetting(context, "vault_auth_mount"));
 	if (result.auth_mount.empty()) {
 		result.auth_mount = AuthMethodToString(result.auth_method);
 	}
+	result.role = SettingOrEnv(context, "vault_role", "VAULT_ROLE");
+	result.jwt_path = GetStringSetting(context, "vault_jwt_path");
 
-	switch (result.auth_method) {
-	case VaultAuthMethod::TOKEN:
-		result.token = SettingOrEnv(context, "vault_token", "VAULT_TOKEN");
-		if (result.token.empty()) {
-			auto home = GetEnv("HOME");
-			if (!home.empty()) {
-				result.token = ReadFileTrimmed(home + "/.vault-token");
+	// Opt-in: a vault secret replaces the credential settings and the environment
+	bool credentials_from_secret = !result.addr.empty() && CredentialsFromSecret(context, result);
+	if (!credentials_from_secret) {
+		auto setting_or_env = [&](const char *setting, const char *env) {
+			auto value = GetStringSetting(context, setting);
+			return value.empty() && env_credentials ? GetEnv(env) : value;
+		};
+		switch (result.auth_method) {
+		case VaultAuthMethod::TOKEN:
+			result.token = setting_or_env("vault_token", "VAULT_TOKEN");
+			if (result.token.empty() && env_credentials) {
+				auto &fs = FileSystem::GetFileSystem(context);
+				auto token_file = fs.ExpandPath("~/.vault-token");
+				if (fs.FileExists(token_file)) {
+					result.token = ReadCredentialFile(fs, token_file);
+				}
 			}
+			break;
+		case VaultAuthMethod::USERPASS:
+		case VaultAuthMethod::LDAP:
+			result.username = setting_or_env("vault_username", "VAULT_USERNAME");
+			result.password = setting_or_env("vault_password", "VAULT_PASSWORD");
+			break;
+		case VaultAuthMethod::KUBERNETES:
+		case VaultAuthMethod::JWT:
+			result.jwt = setting_or_env("vault_jwt", "VAULT_JWT");
+			if (result.jwt_path.empty() && env_credentials && result.auth_method == VaultAuthMethod::KUBERNETES) {
+				result.jwt_path = DEFAULT_KUBERNETES_JWT_PATH;
+			}
+			break;
 		}
-		break;
-	case VaultAuthMethod::USERPASS:
-	case VaultAuthMethod::LDAP:
-		result.username = SettingOrEnv(context, "vault_username", "VAULT_USERNAME");
-		result.password = SettingOrEnv(context, "vault_password", "VAULT_PASSWORD");
-		break;
-	case VaultAuthMethod::KUBERNETES:
-	case VaultAuthMethod::JWT:
-		result.role = SettingOrEnv(context, "vault_role", "VAULT_ROLE");
-		result.jwt = SettingOrEnv(context, "vault_jwt", "VAULT_JWT");
-		result.jwt_path = GetStringSetting(context, "vault_jwt_path");
-		if (result.jwt_path.empty() && result.auth_method == VaultAuthMethod::KUBERNETES) {
-			result.jwt_path = "/var/run/secrets/kubernetes.io/serviceaccount/token";
-		}
-		break;
 	}
 
 	result.kv_mount = TrimSlashes(GetStringSetting(context, "vault_kv_mount"));
@@ -195,6 +239,15 @@ VaultConfig VaultConfig::FromContext(ClientContext &context) {
 		result.kv_mount = "secret";
 	}
 	result.kv_prefix = TrimSlashes(GetStringSetting(context, "vault_kv_prefix"));
+	for (auto &path : {result.kv_mount, result.kv_prefix}) {
+		for (auto &segment : StringUtil::Split(path, '/')) {
+			if (segment == "." || segment == "..") {
+				throw InvalidConfigurationException("vault_kv_mount and vault_kv_prefix must not contain '.' or '..' "
+				                                    "path segments, got '%s'",
+				                                    path);
+			}
+		}
+	}
 
 	Value ttl;
 	if (context.TryGetCurrentSetting(Identifier("vault_cache_ttl_seconds"), ttl) && !ttl.IsNull()) {
