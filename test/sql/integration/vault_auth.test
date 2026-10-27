@@ -125,6 +125,30 @@ DROP PERSISTENT SECRET auth_secret FROM vault;
 ----
 <REGEX>:.*Permission Error: Vault: failed to delete secret 'auth_secret'.*permission denied.*
 
+# --- entries the token may not read are skipped, not an error ------------------
+# User "partial" may list secret/it_partial/ but only read it_partial/visible
+statement ok
+SET vault_username = 'partial';
+
+statement ok
+SET vault_password = 'partial-password';
+
+statement ok
+SET vault_kv_prefix = 'it_partial';
+
+query II
+SELECT name, storage FROM duckdb_secrets();
+----
+visible	vault
+
+query II
+SELECT name, storage FROM which_secret('https://anything.example.com', 'http');
+----
+visible	vault
+
+statement ok
+SET vault_kv_prefix = 'it_auth';
+
 # --- expiring tokens are renewed by logging in again ---------------------------
 statement ok
 SET vault_username = 'shortlived';

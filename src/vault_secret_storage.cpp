@@ -8,6 +8,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <atomic>
+#include <thread>
+
 namespace duckdb {
 
 VaultSecretStorage::VaultSecretStorage(DatabaseInstance &db_p)
@@ -92,26 +95,63 @@ optional_ptr<VaultClient> VaultSecretStorage::Connect(optional_ptr<ClientContext
 	return client.get();
 }
 
-unique_ptr<SecretEntry> VaultSecretStorage::FetchSecret(VaultClient &vault, const string &name) {
-	auto path = DataPath(vault.Config(), name);
-	auto response = vault.Request("GET", path);
-	if (response.status == 404) {
+unique_ptr<SecretEntry> VaultSecretStorage::ParseSecret(const string &name, const string &path,
+                                                        const VaultResponse &response) {
+	// 404: deleted since it was listed. 403: a policy hides this entry from the token, so it is not one of ours.
+	if (response.status == 404 || response.status == 403) {
 		return nullptr;
 	}
 	if (!response.Ok()) {
 		VaultClient::ThrowError("read secret '" + name + "'", path, response);
 	}
 	auto doc = JSONReader::Parse(response.body);
-	auto response_data = JSONReader::Get(doc.Root(), "data");
-	auto custom_metadata = JSONReader::Get(JSONReader::Get(response_data, "metadata"), "custom_metadata");
-	if (JSONReader::GetString(custom_metadata, VaultSecretFormat::MARKER_KEY) != VaultSecretFormat::MARKER_VALUE) {
-		return nullptr; // not a DuckDB secret
-	}
-	auto secret = VaultSecretFormat::Deserialize(name, JSONReader::Get(response_data, "data"));
+	auto secret = VaultSecretFormat::Deserialize(name, JSONReader::Get(JSONReader::Get(doc.Root(), "data"), "data"));
 	if (!secret) {
 		return nullptr;
 	}
 	return MakeEntry(*secret);
+}
+
+//! Run `task(i)` for every i in [0, count) on up to `max_threads` threads; rethrows the first error
+template <class TASK>
+static void RunParallel(idx_t count, idx_t max_threads, TASK &&task) {
+	auto thread_count = MinValue<idx_t>(count, max_threads);
+	if (thread_count <= 1) {
+		for (idx_t i = 0; i < count; i++) {
+			task(i);
+		}
+		return;
+	}
+	std::atomic<idx_t> next(0);
+	mutex error_lock;
+	ErrorData error;
+	auto worker = [&]() {
+		while (true) {
+			auto i = next++;
+			if (i >= count) {
+				return;
+			}
+			try {
+				task(i);
+			} catch (std::exception &ex) {
+				lock_guard<mutex> guard(error_lock);
+				if (!error.HasError()) {
+					error = ErrorData(ex);
+				}
+				next = count; // stop handing out work
+			}
+		}
+	};
+	vector<std::thread> threads;
+	for (idx_t t = 0; t < thread_count; t++) {
+		threads.emplace_back(worker);
+	}
+	for (auto &thread : threads) {
+		thread.join();
+	}
+	if (error.HasError()) {
+		error.Throw();
+	}
 }
 
 VaultSecretStorage::EntryState VaultSecretStorage::ReadEntryState(VaultClient &vault, const string &name) {
@@ -126,17 +166,10 @@ VaultSecretStorage::EntryState VaultSecretStorage::ReadEntryState(VaultClient &v
 	}
 	auto doc = JSONReader::Parse(response.body);
 	auto data = JSONReader::Get(doc.Root(), "data");
-	state.has_metadata = true;
 	state.current_version = JSONReader::GetInt(data, "current_version", 0);
 	auto latest = JSONReader::Get(JSONReader::Get(data, "versions"), std::to_string(state.current_version).c_str());
 	state.exists = latest && JSONReader::GetString(latest, "deletion_time").empty() &&
 	               !duckdb_yyjson::yyjson_is_true(JSONReader::Get(latest, "destroyed"));
-	state.custom_metadata = JSONReader::GetStringMembers(JSONReader::Get(data, "custom_metadata"));
-	for (auto &entry : state.custom_metadata) {
-		if (entry.first == VaultSecretFormat::MARKER_KEY && entry.second == VaultSecretFormat::MARKER_VALUE) {
-			state.is_duckdb = true;
-		}
-	}
 	return state;
 }
 
@@ -163,14 +196,30 @@ void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
 		keys = JSONReader::GetStringArray(JSONReader::Get(JSONReader::Get(doc.Root(), "data"), "keys"));
 	}
 
-	case_insensitive_map_t<unique_ptr<SecretEntry>> new_cache;
+	vector<string> names;
 	for (auto &key : keys) {
-		if (key.empty() || key.back() == '/') {
-			continue; // sub-folder
+		if (!key.empty() && key.back() != '/') { // skip sub-folders
+			names.push_back(key);
 		}
-		auto entry = FetchSecret(vault, key);
+	}
+
+	// Requests are prepared here, where the client connection may be used, and only sent in parallel. The listing
+	// above went through Request, which already logged in again if the token was no longer valid.
+	vault.EnsureAuthenticated();
+	vector<string> paths;
+	vector<VaultHTTPRequest> requests;
+	for (auto &name : names) {
+		paths.push_back(DataPath(config, name));
+		requests.push_back(vault.Prepare("GET", paths.back()));
+	}
+	vector<VaultResponse> responses(names.size());
+	RunParallel(names.size(), MAX_PARALLEL_REQUESTS, [&](idx_t i) { responses[i] = vault.Execute(requests[i]); });
+
+	case_insensitive_map_t<unique_ptr<SecretEntry>> new_cache;
+	for (idx_t i = 0; i < names.size(); i++) {
+		auto entry = ParseSecret(names[i], paths[i], responses[i]);
 		if (entry) {
-			new_cache[key] = std::move(entry);
+			new_cache[names[i]] = std::move(entry);
 		}
 	}
 	cache = std::move(new_cache);
@@ -181,11 +230,6 @@ void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
 bool VaultSecretStorage::WriteSecret(VaultClient &vault, const BaseSecret &secret, const string &name, bool replace) {
 	auto path = DataPath(vault.Config(), name);
 	auto state = ReadEntryState(vault, name);
-	if (state.has_metadata && !state.is_duckdb) {
-		throw InvalidInputException("Cannot store secret '%s' in Vault: a Vault entry that is not a DuckDB secret "
-		                            "already exists at '%s'",
-		                            name, path);
-	}
 	if (state.exists && !replace) {
 		return false;
 	}
@@ -201,24 +245,6 @@ bool VaultSecretStorage::WriteSecret(VaultClient &vault, const BaseSecret &secre
 	auto response = vault.Request("POST", path, body.ToString());
 	if (!response.Ok()) {
 		VaultClient::ThrowError("write secret '" + name + "'", path, response);
-	}
-
-	// Mark the entry only after the data write succeeded, so an entry that is not ours is never marked
-	JSONBuilder metadata_body;
-	auto custom_metadata = metadata_body.NewObject();
-	for (auto &entry : state.custom_metadata) {
-		if (entry.first != VaultSecretFormat::MARKER_KEY) {
-			metadata_body.AddString(custom_metadata, entry.first, entry.second);
-		}
-	}
-	metadata_body.AddString(custom_metadata, VaultSecretFormat::MARKER_KEY, VaultSecretFormat::MARKER_VALUE);
-	metadata_body.AddValue(metadata_body.Root(), "custom_metadata", custom_metadata);
-	auto metadata_path = MetadataPath(vault.Config(), name);
-	auto metadata_response = vault.Request("POST", metadata_path, metadata_body.ToString());
-	if (!metadata_response.Ok()) {
-		VaultClient::ThrowError("mark secret '" + name +
-		                            "' as a DuckDB secret (its data was written; retry with CREATE OR REPLACE)",
-		                        metadata_path, metadata_response);
 	}
 	return true;
 }
@@ -289,7 +315,7 @@ void VaultSecretStorage::DropSecretByName(const Identifier &name_p, OnEntryNotFo
 	auto name = NormalizeName(name_p.GetIdentifierName());
 
 	auto state = ReadEntryState(*vault, name);
-	if (!state.exists || !state.is_duckdb) {
+	if (!state.exists) {
 		cache.erase(name);
 		if (on_entry_not_found == OnEntryNotFound::THROW_EXCEPTION) {
 			throw InvalidInputException("Failed to remove non-existent persistent secret '%s' in secret storage '%s'",

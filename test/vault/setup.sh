@@ -7,14 +7,20 @@ echo "Configuring Vault at $VAULT_ADDR"
 # --- Policies ---------------------------------------------------------------
 vault policy write duckdb-rw - <<'POLICY'
 path "secret/data/*"     { capabilities = ["create", "read", "update", "delete"] }
-path "secret/metadata/*" { capabilities = ["create", "read", "update", "list", "delete"] }
+path "secret/metadata/*" { capabilities = ["read", "list", "delete"] }
 path "kv-alt/data/*"     { capabilities = ["create", "read", "update", "delete"] }
-path "kv-alt/metadata/*" { capabilities = ["create", "read", "update", "list", "delete"] }
+path "kv-alt/metadata/*" { capabilities = ["read", "list", "delete"] }
 POLICY
 
 vault policy write duckdb-ro - <<'POLICY'
 path "secret/data/*"     { capabilities = ["read"] }
 path "secret/metadata/*" { capabilities = ["read", "list"] }
+POLICY
+
+# May list secret/it_partial/ but only read one of its entries
+vault policy write duckdb-partial - <<'POLICY'
+path "secret/metadata/it_partial/*" { capabilities = ["list"] }
+path "secret/data/it_partial/visible" { capabilities = ["read"] }
 POLICY
 
 # --- Extra KV v2 mount (tests vault_kv_mount) ------------------------------
@@ -24,6 +30,7 @@ vault secrets list -format=json | grep -q '"kv-alt/"' || vault secrets enable -p
 vault auth list -format=json | grep -q '"userpass/"' || vault auth enable userpass
 vault write auth/userpass/users/duckdb password=duckdb-password token_policies=duckdb-rw
 vault write auth/userpass/users/readonly password=readonly-password token_policies=duckdb-ro
+vault write auth/userpass/users/partial password=partial-password token_policies=duckdb-partial
 # Tokens that expire quickly, to test re-login
 vault write auth/userpass/users/shortlived password=shortlived-password token_policies=duckdb-rw \
 	token_ttl=3s token_max_ttl=3s
@@ -67,17 +74,12 @@ vault write auth/jwt/role/duckdb role_type=jwt bound_audiences=duckdb-vault user
 	token_policies=duckdb-rw
 
 # --- Seed data: entries written by hand, the way an operator would ---------
-# DuckDB secrets carry the custom metadata duckdb=true
-mark() {
-	vault kv metadata put -custom-metadata=duckdb=true "$1"
-}
 # Written with key=value pairs: every value is a string
 vault kv put secret/it_handwritten/manual_http \
 	type=http \
 	scope='https://api.example.com,https://other.example.com' \
 	bearer_token=hand-written-token \
 	verify_ssl=false
-mark secret/it_handwritten/manual_http
 # Written as JSON: native boolean and a map of headers
 vault kv put secret/it_handwritten/manual_json - <<'JSON'
 {
@@ -88,17 +90,14 @@ vault kv put secret/it_handwritten/manual_json - <<'JSON'
   "extra_http_headers": {"X-From-Vault": "yes"}
 }
 JSON
-mark secret/it_handwritten/manual_json
-# Soft-deleted DuckDB secret: must not show up, and can be created again
+# Soft-deleted secret: must not show up, and can be created again
 vault kv put secret/it_handwritten/deleted_http type=http bearer_token=gone
-mark secret/it_handwritten/deleted_http
 vault kv delete secret/it_handwritten/deleted_http
-
-# Entries of other applications (no marker): never listed, overwritten or deleted by DuckDB
+# No type: not a valid DuckDB secret, skipped
 vault kv put secret/it_handwritten/not_a_duckdb_secret foo=bar
-# Looks exactly like a DuckDB secret, but is not marked
-vault kv put secret/it_handwritten/foreign_s3 type=s3 key_id=app-key secret=app-secret region=eu-west-1
-vault kv put secret/it_handwritten/foreign_deleted type=http bearer_token=app
-vault kv delete secret/it_handwritten/foreign_deleted
+
+# Read by the user "partial", whose policy hides it_partial/hidden
+vault kv put secret/it_partial/visible type=http bearer_token=visible-token
+vault kv put secret/it_partial/hidden type=http bearer_token=hidden-token
 
 echo "Vault configured"

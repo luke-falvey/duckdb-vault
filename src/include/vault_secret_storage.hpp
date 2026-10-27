@@ -12,9 +12,10 @@ namespace duckdb {
 
 //! Persistent secret storage backed by a HashiCorp Vault KV v2 secrets engine.
 //!
-//! Every DuckDB secret is one KV entry at <vault_kv_mount>/<vault_kv_prefix>/<secret name>. Secrets are listed and
-//! read lazily and cached for vault_cache_ttl_seconds. When Vault is not configured (no vault_addr), the storage is
-//! empty and lookups silently find nothing, so DuckDB keeps working normally.
+//! Every DuckDB secret is one KV entry at <vault_kv_mount>/<vault_kv_prefix>/<secret name>; that folder belongs to
+//! DuckDB. Secrets are listed and read lazily (in parallel) and cached for vault_cache_ttl_seconds. Entries the token
+//! may not read are skipped. When Vault is not configured (no vault_addr), the storage is empty and lookups silently
+//! find nothing, so DuckDB keeps working normally.
 class VaultSecretStorage : public SecretStorage {
 public:
 	static constexpr const char *STORAGE_NAME = "vault";
@@ -37,24 +38,22 @@ private:
 	//! Get a client for the current settings. Returns nullptr when Vault is not configured, unless `required`.
 	//! Discards the cached token and secrets when the settings changed. Caller must hold `lock`.
 	optional_ptr<VaultClient> Connect(optional_ptr<ClientContext> context, bool required);
-	//! (Re)load all secrets from Vault if the cache is stale. Caller must hold `lock`.
+	//! Maximum number of secrets read from Vault at the same time
+	static constexpr idx_t MAX_PARALLEL_REQUESTS = 8;
+
+	//! (Re)load all secrets from Vault if the cache is stale, reading them in parallel. Caller must hold `lock`.
 	void EnsureLoaded(VaultClient &client);
-	//! Read one secret from Vault (nullptr if missing or not a DuckDB secret)
-	unique_ptr<SecretEntry> FetchSecret(VaultClient &client, const string &name);
+	//! Turn the response to reading one secret into an entry: nullptr if it is missing, not readable by this token
+	//! (403) or not a DuckDB secret
+	unique_ptr<SecretEntry> ParseSecret(const string &name, const string &path, const VaultResponse &response);
 	//! What is stored at the secret's path, from its KV metadata
 	struct EntryState {
-		//! Metadata exists: the path is taken, even if its latest version is deleted
-		bool has_metadata = false;
 		//! The latest version exists and is not deleted
 		bool exists = false;
-		//! Marked as a DuckDB secret
-		bool is_duckdb = false;
 		int64_t current_version = 0;
-		vector<pair<string, string>> custom_metadata;
 	};
 	EntryState ReadEntryState(VaultClient &client, const string &name);
-	//! Write and mark the secret. Returns false when a DuckDB secret already exists and replace is false. Never
-	//! touches entries that are not DuckDB secrets.
+	//! Write the secret. Returns false when it already exists and replace is false.
 	bool WriteSecret(VaultClient &client, const BaseSecret &secret, const string &name, bool replace);
 
 	string DataPath(const VaultConfig &config, const string &name) const;
