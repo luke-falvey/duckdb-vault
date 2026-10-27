@@ -256,6 +256,26 @@ SELECT name, storage FROM which_secret('https://bulk-33.example.com/file.csv', '
 ----
 bulk_33	vault
 
+# One request at a time, and two at a time: same result
+statement ok
+SET vault_max_parallel_requests = 1;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+40
+
+statement ok
+SET vault_max_parallel_requests = 2;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault' AND secret_string LIKE '%bearer_token=redacted%';
+----
+40
+
+statement ok
+RESET vault_max_parallel_requests;
+
 loop i 0 40
 
 statement ok

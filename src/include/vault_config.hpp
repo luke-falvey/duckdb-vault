@@ -33,6 +33,8 @@ struct VaultConfig {
 	string kv_prefix;
 
 	int64_t cache_ttl_seconds = 60;
+	//! Maximum number of secrets read from Vault at the same time
+	int64_t max_parallel_requests = 8;
 
 	bool IsConfigured() const {
 		return !addr.empty();

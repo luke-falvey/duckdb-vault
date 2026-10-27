@@ -13,9 +13,9 @@ namespace duckdb {
 //! Persistent secret storage backed by a HashiCorp Vault KV v2 secrets engine.
 //!
 //! Every DuckDB secret is one KV entry at <vault_kv_mount>/<vault_kv_prefix>/<secret name>; that folder belongs to
-//! DuckDB. Secrets are listed and read lazily (in parallel) and cached for vault_cache_ttl_seconds. Entries the token
-//! may not read are skipped. When Vault is not configured (no vault_addr), the storage is empty and lookups silently
-//! find nothing, so DuckDB keeps working normally.
+//! DuckDB. Secrets are listed and read lazily (vault_max_parallel_requests at a time) and cached for
+//! vault_cache_ttl_seconds. Entries the token may not read are skipped. When Vault is not configured (no vault_addr),
+//! the storage is empty and lookups silently find nothing, so DuckDB keeps working normally.
 class VaultSecretStorage : public SecretStorage {
 public:
 	static constexpr const char *STORAGE_NAME = "vault";
@@ -38,9 +38,6 @@ private:
 	//! Get a client for the current settings. Returns nullptr when Vault is not configured, unless `required`.
 	//! Discards the cached token and secrets when the settings changed. Caller must hold `lock`.
 	optional_ptr<VaultClient> Connect(optional_ptr<ClientContext> context, bool required);
-	//! Maximum number of secrets read from Vault at the same time
-	static constexpr idx_t MAX_PARALLEL_REQUESTS = 8;
-
 	//! (Re)load all secrets from Vault if the cache is stale, reading them in parallel. Caller must hold `lock`.
 	void EnsureLoaded(VaultClient &client);
 	//! Turn the response to reading one secret into an entry: nullptr if it is missing, not readable by this token
@@ -73,6 +70,7 @@ private:
 	case_insensitive_map_t<unique_ptr<SecretEntry>> cache;
 	bool cache_loaded = false;
 	int64_t cache_ttl_seconds = 60;
+	int64_t max_parallel_requests = 8;
 	std::chrono::steady_clock::time_point cache_loaded_at;
 };
 

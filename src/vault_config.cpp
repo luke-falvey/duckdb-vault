@@ -85,6 +85,12 @@ static void ValidateCacheTTL(ClientContext &context, SetScope scope, Value &para
 	}
 }
 
+static void ValidateMaxParallelRequests(ClientContext &context, SetScope scope, Value &parameter) {
+	if (!parameter.IsNull() && parameter.GetValue<int64_t>() < 1) {
+		throw InvalidInputException("vault_max_parallel_requests must be >= 1");
+	}
+}
+
 string VaultConfig::Fingerprint() const {
 	// Includes credentials so that changing e.g. the token forces a re-login. Never displayed.
 	return StringUtil::Join(vector<string> {addr, vault_namespace, AuthMethodToString(auth_method), auth_mount, token,
@@ -126,6 +132,9 @@ void VaultConfig::RegisterSettings(DBConfig &config) {
 	    LogicalType::VARCHAR, Value("duckdb"));
 	add("vault_cache_ttl_seconds", "How long secrets read from Vault are cached before re-reading (0 disables)",
 	    LogicalType::BIGINT, Value::BIGINT(60), ValidateCacheTTL);
+	add("vault_max_parallel_requests",
+	    "Maximum number of secrets read from Vault at the same time (1 reads one by one)", LogicalType::BIGINT,
+	    Value::BIGINT(8), ValidateMaxParallelRequests);
 }
 
 static string TrimAddress(string value) {
@@ -252,6 +261,11 @@ VaultConfig VaultConfig::FromContext(ClientContext &context) {
 	Value ttl;
 	if (context.TryGetCurrentSetting(Identifier("vault_cache_ttl_seconds"), ttl) && !ttl.IsNull()) {
 		result.cache_ttl_seconds = ttl.GetValue<int64_t>();
+	}
+	Value max_parallel;
+	if (context.TryGetCurrentSetting(Identifier("vault_max_parallel_requests"), max_parallel) &&
+	    !max_parallel.IsNull()) {
+		result.max_parallel_requests = max_parallel.GetValue<int64_t>();
 	}
 	return result;
 }

@@ -53,6 +53,7 @@ somewhere else never sends them there.
 | `vault_kv_mount` | `secret` | Mount path of the KV v2 engine |
 | `vault_kv_prefix` | `duckdb` | Path inside the mount under which secrets are stored |
 | `vault_cache_ttl_seconds` | `60` | How long secrets read from Vault are cached. `0` reads Vault on every lookup |
+| `vault_max_parallel_requests` | `8` | Maximum number of secrets read from Vault at the same time. `1` reads them one by one |
 
 Settings, including `vault_token` and `vault_password`, are visible in `duckdb_settings()`. Prefer the
 environment variables or a `vault` secret (below) for credentials.
@@ -202,7 +203,8 @@ EOF
   check-and-set against the version DuckDB just read, so a concurrent change makes the statement fail rather than
   being overwritten. A soft-deleted DuckDB secret (`vault kv delete`) can be created again.
 - `DROP` deletes the entry's metadata, which removes all its versions.
-- Secrets are read in parallel, up to 8 requests at a time.
+- Secrets are read in parallel, up to `vault_max_parallel_requests` (default 8) at a time. Lower it to reduce the
+  load on Vault, for example under a Vault rate limit quota.
 - Entries the token may not read (HTTP 403) are skipped, so a policy can hide single secrets in the folder. A 403 on
   listing the folder itself is an error.
 - Changes made directly in Vault are picked up after `vault_cache_ttl_seconds`.

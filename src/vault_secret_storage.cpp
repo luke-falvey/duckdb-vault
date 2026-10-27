@@ -82,8 +82,9 @@ optional_ptr<VaultClient> VaultSecretStorage::Connect(optional_ptr<ClientContext
 		}
 		return nullptr;
 	}
-	// The TTL is not part of the fingerprint: changing it must not force a re-login
+	// The TTL and parallelism are not part of the fingerprint: changing them must not force a re-login
 	cache_ttl_seconds = config.cache_ttl_seconds;
+	max_parallel_requests = config.max_parallel_requests;
 	auto new_fingerprint = config.Fingerprint();
 	if (!client || new_fingerprint != fingerprint) {
 		client = make_uniq<VaultClient>(db, std::move(config));
@@ -213,7 +214,8 @@ void VaultSecretStorage::EnsureLoaded(VaultClient &vault) {
 		requests.push_back(vault.Prepare("GET", paths.back()));
 	}
 	vector<VaultResponse> responses(names.size());
-	RunParallel(names.size(), MAX_PARALLEL_REQUESTS, [&](idx_t i) { responses[i] = vault.Execute(requests[i]); });
+	RunParallel(names.size(), NumericCast<idx_t>(max_parallel_requests),
+	            [&](idx_t i) { responses[i] = vault.Execute(requests[i]); });
 
 	case_insensitive_map_t<unique_ptr<SecretEntry>> new_cache;
 	for (idx_t i = 0; i < names.size(); i++) {
