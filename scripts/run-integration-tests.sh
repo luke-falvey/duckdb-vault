@@ -51,5 +51,9 @@ unset VAULT_ADDR VAULT_TOKEN VAULT_NAMESPACE VAULT_USERNAME VAULT_PASSWORD VAULT
 echo "--- Running integration tests"
 "$UNITTEST" "test/sql/integration/*"
 
+echo "--- Running the environment credential tests"
+VAULT_TEST_ENV_CREDENTIALS=1 VAULT_TEST_PORT="${VAULT_PORT}" VAULT_ADDR="${VAULT_TEST_ADDR}" VAULT_TOKEN="${VAULT_TEST_TOKEN}" \
+	"$UNITTEST" "test/sql/env/*"
+
 echo "--- Checking the layout of secrets stored in Vault"
 python3 scripts/check_vault_format.py

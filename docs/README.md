@@ -34,7 +34,10 @@ and DuckDB behaves exactly as without the extension.
 ## Settings
 
 All settings are global (`SET` or `SET GLOBAL`). Settings left empty fall back to the standard Vault
-environment variables.
+environment variables. Credentials from the environment or from files (`$VAULT_TOKEN`, `~/.vault-token`,
+`$VAULT_USERNAME`, `$VAULT_PASSWORD`, `$VAULT_JWT`, the Kubernetes service account token) are only used when the
+Vault address also comes from `$VAULT_ADDR` (or `vault_addr` is set to the same address). Pointing `vault_addr`
+somewhere else never sends them there.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -52,7 +55,10 @@ environment variables.
 | `vault_cache_ttl_seconds` | `60` | How long secrets read from Vault are cached. `0` reads Vault on every lookup |
 
 Settings, including `vault_token` and `vault_password`, are visible in `duckdb_settings()`. Prefer the
-environment variables for credentials.
+environment variables or a `vault` secret (below) for credentials.
+
+`vault_jwt_path` and `~/.vault-token` are read through DuckDB's file system, so `enable_external_access` and
+`allowed_directories` apply to them.
 
 `vault_status()` shows the resolved configuration and whether DuckDB can log in:
 
@@ -105,10 +111,28 @@ SET vault_jwt_path = '/path/to/token.jwt';
 Tokens from logins are cached and renewed by logging in again shortly before they expire, or after Vault
 rejects them.
 
+### Credentials in a secret (optional)
+
+Instead of the credential settings, the credentials can be kept in a DuckDB secret of type `vault`. Secrets are
+redacted in `duckdb_secrets()` and are not shown by `duckdb_settings()`:
+
+```sql
+CREATE SECRET vault_login (TYPE vault, TOKEN 'hvs.…');
+-- or: (TYPE vault, USERNAME 'alice', PASSWORD '…'), (TYPE vault, ROLE 'duckdb', JWT '…')
+
+-- Only for one Vault server
+CREATE SECRET vault_prod (TYPE vault, TOKEN 'hvs.…', SCOPE 'https://vault.example.com:8200');
+```
+
+This is opt-in: nothing changes unless such a secret exists. When a `vault` secret matches `vault_addr`, its
+`token`, `username`, `password` and `jwt` replace the credential settings and the environment, and its `role`
+(if set) replaces `vault_role`. `vault_auth_method` still selects how to log in. A `vault` secret can be temporary
+or persistent in DuckDB's local storage, but not stored in Vault itself.
+
 ## Storage format
 
 Each DuckDB secret is one KV v2 entry at `<vault_kv_mount>/<vault_kv_prefix>/<secret name>` (secret names are
-lower-case). With the defaults, `CREATE PERSISTENT SECRET my_s3 IN vault (...)` writes `secret/duckdb/my_s3`:
+lower-case and cannot contain `/` or be `.` or `..`; the mount and prefix cannot contain `.` or `..` segments). With the defaults, `CREATE PERSISTENT SECRET my_s3 IN vault (...)` writes `secret/duckdb/my_s3`:
 
 ```
 $ vault kv get -format=json secret/duckdb/my_s3 | jq .data.data
@@ -242,7 +266,8 @@ make                      # build first
 make integration-test     # starts Vault with docker compose, runs the tests, stops Vault
 ```
 
-`scripts/run-integration-tests.sh` also checks the raw Vault entry against the format above
+`scripts/run-integration-tests.sh` also runs `test/sql/env/` with `VAULT_ADDR`/`VAULT_TOKEN` in the environment, to
+check that environment credentials only go to that address, and checks the raw Vault entries against the format above
 (`scripts/check_vault_format.py`). Set `KEEP_VAULT=1` to leave Vault running afterwards
 (`http://127.0.0.1:8200`, token `root`). The JWT fixtures can be regenerated with `test/vault/generate-jwt.sh`.
 

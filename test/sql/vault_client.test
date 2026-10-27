@@ -38,7 +38,7 @@ SET vault_role = 'my-role';
 query I
 SELECT error FROM vault_status();
 ----
-<REGEX>:.*requires vault_jwt or vault_jwt_path.*
+<REGEX>:.*requires vault_jwt, vault_jwt_path or a secret of type vault.*
 
 statement ok
 SET vault_jwt_path = '/nonexistent/token';
@@ -47,3 +47,96 @@ query I
 SELECT error FROM vault_status();
 ----
 <REGEX>:.*Could not read Vault JWT from file '/nonexistent/token'.*
+
+# --- names and paths that would be resolved as path segments ------------------
+statement ok
+SET vault_auth_method = 'token';
+
+statement error
+CREATE PERSISTENT SECRET "." IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+must not be '.' or '..'
+
+statement error
+CREATE PERSISTENT SECRET ".." IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+must not be '.' or '..'
+
+statement error
+DROP PERSISTENT SECRET "." FROM vault;
+----
+must not be '.' or '..'
+
+statement ok
+SET vault_kv_prefix = 'team/../other';
+
+statement error
+CREATE PERSISTENT SECRET s1 IN vault (TYPE http, BEARER_TOKEN 'abc');
+----
+must not contain '.' or '..' path segments
+
+statement ok
+RESET vault_kv_prefix;
+
+# --- credentials in a secret of type vault (opt-in) ----------------------------
+statement ok
+RESET vault_token;
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*no token was found.*
+
+statement ok
+CREATE SECRET vault_creds (TYPE vault, TOKEN 'from-secret', PASSWORD 'pw', USERNAME 'user');
+
+# The token now comes from the secret, so the connection is attempted
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*Failed to connect to Vault at http://127.0.0.1:1.*
+
+# Credentials are redacted like any other secret (without an address, so the vault storage is not queried)
+statement ok
+RESET vault_addr;
+
+query I
+SELECT secret_string FROM duckdb_secrets() WHERE name = 'vault_creds';
+----
+name=vault_creds;type=vault;provider=config;serializable=true;scope;password=redacted;token=redacted;username=user
+
+statement ok
+SET vault_addr = 'http://127.0.0.1:1';
+
+# A vault secret scoped to another address is not used
+statement ok
+DROP TEMPORARY SECRET vault_creds;
+
+statement ok
+CREATE SECRET vault_elsewhere (TYPE vault, TOKEN 'other', SCOPE 'https://other-vault.example.com');
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*no token was found.*
+
+# Vault credentials cannot be stored in Vault itself
+statement error
+CREATE PERSISTENT SECRET vault_in_vault IN vault (TYPE vault, TOKEN 'x');
+----
+cannot be stored in Vault
+
+# --- credential files go through DuckDB's file access checks --------------------
+statement ok
+SET vault_auth_method = 'jwt';
+
+statement ok
+SET vault_jwt_path = 'test/vault/test.jwt';
+
+statement ok
+SET enable_external_access = false;
+
+query I
+SELECT error FROM vault_status();
+----
+<REGEX>:.*Could not read Vault JWT from file 'test/vault/test.jwt'.*disabled by configuration.*

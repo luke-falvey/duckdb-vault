@@ -224,6 +224,44 @@ SELECT authenticated, error LIKE '%role "no-such-role" could not be found%' FROM
 ----
 false	true
 
+# --- credentials in a secret of type vault (opt-in) ----------------------------
+statement ok
+SET vault_auth_method = 'token';
+
+# The secret takes precedence over the credential settings
+statement ok
+SET vault_token = 'not-a-valid-token';
+
+statement ok
+CREATE SECRET vault_root (TYPE vault, TOKEN '{VAULT_TEST_TOKEN}');
+
+query II
+SELECT authenticated, display_name FROM vault_status();
+----
+true	token
+
+query I
+SELECT name FROM duckdb_secrets() WHERE storage = 'vault';
+----
+auth_secret
+
+statement ok
+DROP TEMPORARY SECRET vault_root;
+
+statement ok
+SET vault_auth_method = 'userpass';
+
+statement ok
+CREATE SECRET vault_user (TYPE vault, USERNAME 'duckdb', PASSWORD 'duckdb-password');
+
+query II
+SELECT authenticated, display_name FROM vault_status();
+----
+true	userpass-duckdb
+
+statement ok
+DROP TEMPORARY SECRET vault_user;
+
 # --- clean up with the root token --------------------------------------------
 statement ok
 SET vault_auth_method = 'token';

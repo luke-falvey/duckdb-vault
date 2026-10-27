@@ -2,13 +2,11 @@
 #include "vault_json.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/http/http_util.hpp"
-
-#include <fstream>
-#include <sstream>
 
 namespace duckdb {
 
@@ -105,26 +103,15 @@ VaultResponse VaultClient::Send(const string &method, const string &path, const 
 	return result;
 }
 
-static string ReadJWTFile(const string &path) {
-	std::ifstream in(path);
-	if (!in.good()) {
-		throw InvalidConfigurationException("Could not read Vault JWT from file '%s'", path);
-	}
-	std::stringstream buffer;
-	buffer << in.rdbuf();
-	auto result = buffer.str();
-	StringUtil::Trim(result);
-	return result;
-}
-
 void VaultClient::Login() {
 	string path;
 	JSONBuilder body;
 	switch (config.auth_method) {
 	case VaultAuthMethod::TOKEN:
 		if (config.token.empty()) {
-			throw InvalidConfigurationException("Vault auth method is 'token' but no token was found: set vault_token, "
-			                                    "the VAULT_TOKEN environment variable or ~/.vault-token");
+			throw InvalidConfigurationException(
+			    "Vault auth method is 'token' but no token was found: set vault_token or a secret of type vault. "
+			    "VAULT_TOKEN and ~/.vault-token are only used for the address in VAULT_ADDR");
 		}
 		token = config.token;
 		has_expiry = false;
@@ -132,8 +119,9 @@ void VaultClient::Login() {
 	case VaultAuthMethod::USERPASS:
 	case VaultAuthMethod::LDAP:
 		if (config.username.empty() || config.password.empty()) {
-			throw InvalidConfigurationException("Vault auth method '%s' requires vault_username and vault_password",
-			                                    VaultConfig::AuthMethodToString(config.auth_method));
+			throw InvalidConfigurationException(
+			    "Vault auth method '%s' requires vault_username and vault_password (or a secret of type vault)",
+			    VaultConfig::AuthMethodToString(config.auth_method));
 		}
 		path = "auth/" + config.auth_mount + "/login/" + EncodePathSegment(config.username);
 		body.AddString(body.Root(), "password", config.password);
@@ -147,9 +135,17 @@ void VaultClient::Login() {
 		auto jwt = config.jwt;
 		if (jwt.empty()) {
 			if (config.jwt_path.empty()) {
-				throw InvalidConfigurationException("Vault auth method 'jwt' requires vault_jwt or vault_jwt_path");
+				throw InvalidConfigurationException(
+				    "Vault auth method '%s' requires vault_jwt, vault_jwt_path or a secret of type vault",
+				    VaultConfig::AuthMethodToString(config.auth_method));
 			}
-			jwt = ReadJWTFile(config.jwt_path);
+			auto &fs = context ? FileSystem::GetFileSystem(*context) : FileSystem::GetFileSystem(db);
+			try {
+				jwt = VaultConfig::ReadCredentialFile(fs, config.jwt_path);
+			} catch (std::exception &ex) {
+				throw InvalidConfigurationException("Could not read Vault JWT from file '%s': %s", config.jwt_path,
+				                                    ErrorData(ex).RawMessage());
+			}
 		}
 		path = "auth/" + config.auth_mount + "/login";
 		body.AddString(body.Root(), "role", config.role);

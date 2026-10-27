@@ -5,6 +5,7 @@
 namespace duckdb {
 
 class DBConfig;
+class FileSystem;
 
 //! Supported Vault authentication methods
 enum class VaultAuthMethod : uint8_t { TOKEN, USERPASS, LDAP, KUBERNETES, JWT };
@@ -39,6 +40,14 @@ struct VaultConfig {
 
 	//! Identity of the connection/credentials: if this changes, cached tokens and secrets are discarded
 	string Fingerprint() const;
+
+	//! Secret type that can hold the credentials (opt-in, instead of the credential settings)
+	static constexpr const char *SECRET_TYPE = "vault";
+	static constexpr const char *DEFAULT_KUBERNETES_JWT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+	static constexpr idx_t MAX_CREDENTIAL_FILE_SIZE = 1024 * 1024;
+
+	//! Read a token or JWT file through DuckDB's file system (so file access settings apply)
+	static string ReadCredentialFile(FileSystem &fs, const string &path);
 
 	static string AuthMethodToString(VaultAuthMethod method);
 	static VaultAuthMethod AuthMethodFromString(const string &method);

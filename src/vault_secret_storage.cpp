@@ -44,9 +44,10 @@ string VaultSecretStorage::MetadataPath(const VaultConfig &config, const string 
 
 string VaultSecretStorage::NormalizeName(const string &name) {
 	auto result = StringUtil::Lower(name);
-	if (result.empty() || result.find('/') != string::npos) {
-		throw InvalidInputException("Secret name '%s' cannot be stored in Vault: names must be non-empty and must not "
-		                            "contain '/'",
+	// '.' and '..' would be resolved as path segments and address another entry
+	if (result.empty() || result == "." || result == ".." || result.find('/') != string::npos) {
+		throw InvalidInputException("Secret name '%s' cannot be stored in Vault: names must be non-empty, must not "
+		                            "be '.' or '..' and must not contain '/'",
 		                            name);
 	}
 	return result;
@@ -225,6 +226,10 @@ bool VaultSecretStorage::WriteSecret(VaultClient &vault, const BaseSecret &secre
 unique_ptr<SecretEntry> VaultSecretStorage::StoreSecret(unique_ptr<const BaseSecret> secret,
                                                         OnCreateConflict on_conflict,
                                                         optional_ptr<CatalogTransaction> transaction) {
+	if (StringUtil::CIEquals(secret->GetType().GetIdentifierName(), VaultConfig::SECRET_TYPE)) {
+		throw InvalidInputException("Secrets of type '%s' hold the credentials for Vault and cannot be stored in Vault",
+		                            VaultConfig::SECRET_TYPE);
+	}
 	lock_guard<mutex> guard(lock);
 	auto vault = Connect(GetContext(transaction), true);
 	auto name = NormalizeName(secret->GetName().GetIdentifierName());
@@ -303,7 +308,8 @@ void VaultSecretStorage::DropSecretByName(const Identifier &name_p, OnEntryNotFo
 
 SecretMatch VaultSecretStorage::LookupSecret(const string &path, const string &type,
                                              optional_ptr<CatalogTransaction> transaction) {
-	if (VaultClient::RequestInProgress()) {
+	// Vault credentials are looked up while connecting to Vault, and are never stored in it
+	if (VaultClient::RequestInProgress() || StringUtil::CIEquals(type, VaultConfig::SECRET_TYPE)) {
 		// Re-entered while talking to Vault (HTTP secret lookup for the Vault URL): Vault cannot answer that
 		return SecretMatch();
 	}

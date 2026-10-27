@@ -79,10 +79,43 @@ static void VaultStatusFunction(ClientContext &context, TableFunctionInput &data
 	output.data[8].Append(authenticated ? Value() : Value(error));
 }
 
+//===--------------------------------------------------------------------===//
+// Secret type vault: opt-in storage for the credentials used to log in to Vault
+//===--------------------------------------------------------------------===//
+static const char *const VAULT_SECRET_KEYS[] = {"token", "username", "password", "role", "jwt"};
+
+static unique_ptr<BaseSecret> CreateVaultSecret(ClientContext &context, CreateSecretInput &input) {
+	auto secret = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+	for (auto key : VAULT_SECRET_KEYS) {
+		secret->TrySetValue(key, input);
+	}
+	secret->redact_keys = {"token", "password", "jwt"};
+	return std::move(secret);
+}
+
+static void RegisterVaultSecretType(ExtensionLoader &loader) {
+	SecretType secret_type;
+	secret_type.name = VaultConfig::SECRET_TYPE;
+	secret_type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
+	secret_type.default_provider = "config";
+	secret_type.extension = "vault";
+	loader.RegisterSecretType(secret_type);
+
+	CreateSecretFunction function;
+	function.secret_type = VaultConfig::SECRET_TYPE;
+	function.provider = "config";
+	function.function = CreateVaultSecret;
+	for (auto key : VAULT_SECRET_KEYS) {
+		function.named_parameters[key] = LogicalType::VARCHAR;
+	}
+	loader.RegisterFunction(function);
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	VaultConfig::RegisterSettings(DBConfig::GetConfig(db));
 	SecretManager::Get(db).LoadSecretStorage(make_uniq<VaultSecretStorage>(db));
+	RegisterVaultSecretType(loader);
 
 	loader.RegisterFunction(TableFunction("vault_status", {}, VaultStatusFunction, VaultStatusBind, VaultStatusInit));
 	loader.SetDescription("Store and read DuckDB secrets in HashiCorp Vault");
