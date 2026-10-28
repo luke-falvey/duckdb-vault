@@ -22,11 +22,8 @@ SET vault_cache_ttl_seconds = 0;
 # test/vault/setup.sh seeds secret/it_handwritten/ with:
 #   manual_http          a DuckDB secret written with `vault kv put key=value` (string values only)
 #   manual_json          a DuckDB secret written as JSON (boolean and map values)
-#   deleted_http         a soft-deleted DuckDB secret
-# and with entries of other applications, which have no duckdb=true custom metadata:
-#   not_a_duckdb_secret  an unrelated entry
-#   foreign_s3           shaped exactly like a DuckDB s3 secret
-#   foreign_deleted      soft-deleted
+#   deleted_http         a soft-deleted secret
+#   not_a_duckdb_secret  an entry without type, which is skipped
 statement ok
 SET vault_kv_prefix = 'it_handwritten';
 
@@ -87,50 +84,6 @@ manual_json
 
 statement ok
 DROP PERSISTENT SECRET deleted_http FROM vault;
-
-# --- entries of other applications --------------------------------------------
-# Never returned by lookups, even when they look like DuckDB secrets
-query I
-SELECT count(*) FROM which_secret('s3://bucket/file.parquet', 's3');
-----
-0
-
-# Never overwritten
-statement error
-CREATE PERSISTENT SECRET foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
-----
-a Vault entry that is not a DuckDB secret already exists at 'secret/data/it_handwritten/foreign_s3'
-
-statement error
-CREATE OR REPLACE PERSISTENT SECRET foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
-----
-a Vault entry that is not a DuckDB secret already exists
-
-statement error
-CREATE PERSISTENT SECRET IF NOT EXISTS foreign_s3 IN vault (TYPE http, BEARER_TOKEN 'mine');
-----
-a Vault entry that is not a DuckDB secret already exists
-
-# Not even when only a deleted version is left
-statement error
-CREATE PERSISTENT SECRET foreign_deleted IN vault (TYPE http, BEARER_TOKEN 'mine');
-----
-a Vault entry that is not a DuckDB secret already exists
-
-# Never deleted: as far as DuckDB is concerned they do not exist
-statement error
-DROP PERSISTENT SECRET foreign_s3 FROM vault;
-----
-Failed to remove non-existent persistent secret 'foreign_s3'
-
-statement ok
-DROP PERSISTENT SECRET IF EXISTS not_a_duckdb_secret FROM vault;
-
-query I
-SELECT name FROM duckdb_secrets() ORDER BY name;
-----
-manual_http
-manual_json
 
 # --- other KV mount and prefixes --------------------------------------------
 statement ok

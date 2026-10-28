@@ -225,3 +225,65 @@ statement error
 CREATE TEMPORARY SECRET tmp IN vault (TYPE http);
 ----
 Cannot create temporary secrets in a persistent secret storage!
+
+# --- many secrets: read back in parallel --------------------------------------
+statement ok
+SET vault_kv_prefix = 'it_bulk';
+
+loop i 0 40
+
+statement ok
+CREATE OR REPLACE PERSISTENT SECRET bulk_{i} IN vault (TYPE http, BEARER_TOKEN 'token-{i}', SCOPE 'https://bulk-{i}.example.com');
+
+endloop
+
+# Read everything from Vault on every lookup
+statement ok
+SET vault_cache_ttl_seconds = 0;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+40
+
+query I
+SELECT secret_string FROM duckdb_secrets(redact=false) WHERE name = 'bulk_17';
+----
+name=bulk_17;type=http;provider=config;serializable=true;scope=https://bulk-17.example.com;bearer_token=token-17
+
+query II
+SELECT name, storage FROM which_secret('https://bulk-33.example.com/file.csv', 'http');
+----
+bulk_33	vault
+
+# One request at a time, and two at a time: same result
+statement ok
+SET vault_max_parallel_requests = 1;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+40
+
+statement ok
+SET vault_max_parallel_requests = 2;
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault' AND secret_string LIKE '%bearer_token=redacted%';
+----
+40
+
+statement ok
+RESET vault_max_parallel_requests;
+
+loop i 0 40
+
+statement ok
+DROP PERSISTENT SECRET bulk_{i} FROM vault;
+
+endloop
+
+query I
+SELECT count(*) FROM duckdb_secrets() WHERE storage = 'vault';
+----
+0

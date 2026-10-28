@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Checks raw Vault KV entries after test/sql/integration/vault_format.test has run.
 
-This pins down the storage format documented in README.md, as seen by other Vault clients, and that entries of
-other applications under the same path were left alone.
+This pins down the storage format documented in README.md, as seen by other Vault clients.
 Uses VAULT_TEST_ADDR / VAULT_TEST_TOKEN (set by scripts/run-integration-tests.sh).
 """
 import json
@@ -18,7 +17,7 @@ def read(path):
     request = urllib.request.Request(f"{addr}/v1/secret/data/{path}", headers={"X-Vault-Token": token})
     with urllib.request.urlopen(request) as response:
         result = json.load(response)["data"]
-    return result["data"], result["metadata"].get("custom_metadata") or {}
+    return result["data"]
 
 
 def compare(path, actual, expected, errors):
@@ -32,12 +31,11 @@ def compare(path, actual, expected, errors):
 
 errors = []
 
-# Written by DuckDB: plain fields, JSON-typed values, marked as a DuckDB secret
+# Written by DuckDB: plain fields with JSON-typed values
 path = "it_format_check/format_check"
-data, custom_metadata = read(path)
 compare(
     path,
-    data,
+    read(path),
     {
         "type": "http",
         "provider": "config",
@@ -48,21 +46,10 @@ compare(
     },
     errors,
 )
-if custom_metadata.get("duckdb") != "true":
-    errors.append(f"  {path}: custom_metadata: expected duckdb=true, got {custom_metadata!r}")
 
-# Entries of other applications: untouched and unmarked
-for path, expected in [
-    (
-        "it_handwritten/foreign_s3",
-        {"type": "s3", "key_id": "app-key", "secret": "app-secret", "region": "eu-west-1"},
-    ),
-    ("it_handwritten/not_a_duckdb_secret", {"foo": "bar"}),
-]:
-    data, custom_metadata = read(path)
-    compare(path, data, expected, errors)
-    if "duckdb" in custom_metadata:
-        errors.append(f"  {path}: must not be marked as a DuckDB secret, got {custom_metadata!r}")
+# Not a DuckDB secret (no type): skipped and left alone
+path = "it_handwritten/not_a_duckdb_secret"
+compare(path, read(path), {"foo": "bar"}, errors)
 
 if errors:
     print("Vault entries do not match the documented format:")

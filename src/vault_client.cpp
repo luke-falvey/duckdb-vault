@@ -50,48 +50,68 @@ string VaultClient::EncodePathSegment(const string &segment) {
 	return result;
 }
 
-VaultResponse VaultClient::Send(const string &method, const string &path, const string &body, bool with_token) {
-	auto url = config.addr + "/v1/" + path;
-	// Setting up the request looks up HTTP secrets for the URL, which asks the vault storage again
-	struct RequestScope {
-		RequestScope() {
-			request_in_progress = true;
-		}
-		~RequestScope() {
-			request_in_progress = false;
-		}
-	} scope;
+namespace {
+//! Marks this thread as being inside a Vault request: setting up and sending a request looks up HTTP secrets for the
+//! URL, which asks the vault storage again
+struct RequestScope {
+	RequestScope() : previous(request_in_progress) {
+		request_in_progress = true;
+	}
+	~RequestScope() {
+		request_in_progress = previous;
+	}
+	bool previous;
+};
+} // namespace
+
+VaultHTTPRequest VaultClient::PrepareRequest(const string &method, const string &path, const string &body,
+                                             bool with_token) {
+	RequestScope scope;
+	VaultHTTPRequest request;
+	request.method = method;
+	request.url = config.addr + "/v1/" + path;
+	request.body = body;
 	auto &http_util = HTTPUtil::Get(db);
 	// Parameters from the connection (when there is one) pick up its httpfs settings, e.g. ca_cert_file
-	auto params = context ? http_util.InitializeParameters(*context, url) : http_util.InitializeParameters(db, url);
+	request.params = context ? http_util.InitializeParameters(*context, request.url)
+	                         : http_util.InitializeParameters(db, request.url);
 
-	HTTPHeaders headers(db);
-	headers.Insert("X-Vault-Request", "true");
+	request.headers = HTTPHeaders(db);
+	request.headers.Insert("X-Vault-Request", "true");
 	if (with_token && !token.empty()) {
-		headers.Insert("X-Vault-Token", token);
+		request.headers.Insert("X-Vault-Token", token);
 	}
 	if (!config.vault_namespace.empty()) {
-		headers.Insert("X-Vault-Namespace", config.vault_namespace);
+		request.headers.Insert("X-Vault-Namespace", config.vault_namespace);
 	}
+	if (method == "POST") {
+		request.headers.Insert("Content-Type", "application/json");
+	}
+	return request;
+}
 
+VaultResponse VaultClient::Execute(VaultHTTPRequest &request) const {
+	RequestScope scope;
+	auto &http_util = HTTPUtil::Get(db);
+	auto &params = *request.params;
 	unique_ptr<HTTPResponse> response;
-	if (method == "GET") {
-		GetRequestInfo request(url, headers, *params, nullptr, nullptr);
-		request.try_request = true;
-		response = http_util.Request(request);
-	} else if (method == "POST") {
-		headers.Insert("Content-Type", "application/json");
-		PostRequestInfo request(url, headers, *params, const_data_ptr_cast(body.c_str()), body.size());
-		request.try_request = true;
-		response = http_util.Request(request);
+	if (request.method == "GET") {
+		GetRequestInfo info(request.url, request.headers, params, nullptr, nullptr);
+		info.try_request = true;
+		response = http_util.Request(info);
+	} else if (request.method == "POST") {
+		PostRequestInfo info(request.url, request.headers, params, const_data_ptr_cast(request.body.c_str()),
+		                     request.body.size());
+		info.try_request = true;
+		response = http_util.Request(info);
 		// httpfs returns the body of a POST response here
-		response->body = std::move(request.buffer_out);
-	} else if (method == "DELETE") {
-		DeleteRequestInfo request(url, headers, *params);
-		request.try_request = true;
-		response = http_util.Request(request);
+		response->body = std::move(info.buffer_out);
+	} else if (request.method == "DELETE") {
+		DeleteRequestInfo info(request.url, request.headers, params);
+		info.try_request = true;
+		response = http_util.Request(info);
 	} else {
-		throw InternalException("Unsupported Vault HTTP method %s", method);
+		throw InternalException("Unsupported Vault HTTP method %s", request.method);
 	}
 	// try_request: failures come back as a response instead of an exception
 	if (response->HasRequestError()) {
@@ -101,6 +121,15 @@ VaultResponse VaultClient::Send(const string &method, const string &path, const 
 	result.status = static_cast<int>(response->status);
 	result.body = std::move(response->body);
 	return result;
+}
+
+VaultResponse VaultClient::Send(const string &method, const string &path, const string &body, bool with_token) {
+	auto request = PrepareRequest(method, path, body, with_token);
+	return Execute(request);
+}
+
+VaultHTTPRequest VaultClient::Prepare(const string &method, const string &path, const string &body) {
+	return PrepareRequest(method, path, body, true);
 }
 
 void VaultClient::Login() {
